@@ -19,7 +19,7 @@ These were chosen deliberately; re-read before "improving" them.
 
 - **Classic `INPUT_TYPES` style, not the V3 `io.Schema` API.** Matches the sibling ComfyUI-Lenient-Switch package and works on older ComfyUI builds. The V3 API in `comfy_extras/nodes_video.py` is *not* what this node uses.
 - **`comfy_api` is imported under try/except** (`comfy_api.input_impl.VideoFromComponents`, `comfy_api.util.VideoComponents` — the backwards-compat shims, not the `comfy_api.latest._*` internals). Pyright flags them as unresolved, which is expected. On a ComfyUI without VIDEO support the node still registers and raises a readable error from `load`. The `if VideoFromComponents is None or VideoComponents is None` guard checks **both** names so Pyright narrows both — checking only one reintroduces `reportOptionalCall`.
-- **Only one output, `VIDEO`.** No IMAGE/MASK/fps side outputs — users go through the stock `Get Video Components`.
+- **Two outputs, `VIDEO` and `IMAGE`, in that order.** The frames tensor is already built before it is wrapped in `VideoFromComponents`, so re-emitting it as `images` is free and spares the near-universal `Get Video Components` hop into a sampler. `images` is **appended**, never inserted, so old workflows keep their links. Still no MASK/fps/bit_depth outputs — alpha is already flattened onto `background`, and the rest is what `Get Video Components` is for.
 - **Frame rate is always derived from the source; there is no fps widget.** `speed` multiplies that derived rate. Frames are never interpolated or dropped, so `speed = 1.0` is a frame-exact copy of the source. Do not add an fps input or resampling-by-speed; that was explicitly rejected.
 - **`LoopVideo` drops audio whenever `speed != 1.0`.** Since only the frame rate changes, kept audio would drift out of sync; shipping no audio beats shipping wrong audio. Retiming the waveform was considered and rejected as out of scope.
 
@@ -54,6 +54,8 @@ The pipeline is `_read_animation` → `_to_uniform_timebase` → modulo-index in
 `_list_animation_files` filters by extension (`.gif/.webp/.png/.apng`) rather than using `folder_paths.filter_files_content_types(files, ["image"])`, which would also list JPEGs that can never be animations. `.png` is in the list because APNG shares the extension; a plain PNG loads as a single-frame animation and still works.
 
 The `file` combo uses `{"image_upload": True}` — animated GIF/WEBP/APNG go through ComfyUI's *image* upload endpoint, not the video one.
+
+**The options list is `["", *files]` with `"default": ""`.** ComfyUI has no remember-last-value mechanism; a combo simply defaults to its first option, so without the blank a newly added node silently points at whatever file sorts first and looks configured when it is not. `VALIDATE_INPUTS` turns the blank into a readable "No animation file selected", and `IS_CHANGED` returns `nan` for it (validation aborts first, but `getmtime("")` would raise if it ever ran).
 
 ## Commands
 

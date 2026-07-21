@@ -65,8 +65,9 @@ class LoopVideo:
             },
         }
 
-    RETURN_TYPES = ("VIDEO",)
-    RETURN_NAMES = ("video",)
+    # `images` is appended, never inserted — existing workflows keep their links.
+    RETURN_TYPES = ("VIDEO", "IMAGE")
+    RETURN_NAMES = ("video", "images")
     FUNCTION = "loop"
     CATEGORY = "load-gif-as-video"
     DESCRIPTION = (
@@ -102,11 +103,10 @@ class LoopVideo:
         if float(speed) == 1.0 and components.audio is not None:
             audio = _loop_audio(components.audio, source_length, count, fps)
 
-        return (
-            VideoFromComponents(
-                VideoComponents(images=looped, frame_rate=fps, audio=audio)
-            ),
+        video = VideoFromComponents(
+            VideoComponents(images=looped, frame_rate=fps, audio=audio)
         )
+        return (video, looped)
 
 
 NODE_CLASS_MAPPINGS = {

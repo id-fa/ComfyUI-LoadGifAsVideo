@@ -15,7 +15,7 @@ The stock `Load Video` node cannot open animated images, and turning a GIF into 
 
 | Input | Type | Description |
 | --- | --- | --- |
-| `file` | COMBO (upload) | Animated GIF / APNG / WEBP in the ComfyUI `input` directory. Drag-and-drop upload is supported. |
+| `file` | COMBO (upload) | Animated GIF / APNG / WEBP in the ComfyUI `input` directory. Drag-and-drop upload is supported. A new node starts blank and reports "No animation file selected" until you pick one. |
 | `length_mode` | `frames` / `seconds` / `loops` | How the output length is specified. |
 | `frames` | INT | Number of frames to output. Used when `length_mode = frames`. |
 | `seconds` | FLOAT | Duration to output in seconds. Used when `length_mode = seconds`. |
@@ -25,7 +25,8 @@ The stock `Load Video` node cannot open animated images, and turning a GIF into 
 
 | Output | Type | Description |
 | --- | --- | --- |
-| `video` | VIDEO | The animation as a video stream. Feed it to `Save Video`, `Get Video Components`, or any VIDEO input. |
+| `video` | VIDEO | The animation as a video stream. Feed it to `Save Video` or any VIDEO input. |
+| `images` | IMAGE | The same frames as an image batch, for feeding a sampler directly. Saves wiring up `Get Video Components`. |
 
 ### Loop Video
 
@@ -43,6 +44,7 @@ Loops any VIDEO — an MP4 or WEBM via the stock `Load Video`, a generated video
 | Output | Type | Description |
 | --- | --- | --- |
 | `video` | VIDEO | The looped video. |
+| `images` | IMAGE | The looped frames as an image batch. |
 
 **Audio.** At `speed = 1.0` the audio is looped along with the frames: the source's audio is fitted to exactly one video loop (truncated or zero-padded) and then repeated, so every loop restarts in sync with frame 0. At any other speed only the frame rate changes, which would put the audio out of sync — so the audio is dropped. If you need the audio at a different speed, retime it separately.
 

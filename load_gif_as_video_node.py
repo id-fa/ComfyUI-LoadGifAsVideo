@@ -120,8 +120,11 @@ class LoadGifAsVideo:
         return {
             "required": {
                 "file": (
-                    _list_animation_files(),
+                    # The leading blank is the default, so a freshly added node
+                    # never silently points at whatever file happens to sort first.
+                    ["", *_list_animation_files()],
                     {
+                        "default": "",
                         "image_upload": True,
                         "tooltip": "Animated GIF / APNG / WEBP in the ComfyUI input directory.",
                     },
@@ -137,8 +140,9 @@ class LoadGifAsVideo:
             },
         }
 
-    RETURN_TYPES = ("VIDEO",)
-    RETURN_NAMES = ("video",)
+    # `images` is appended, never inserted — existing workflows keep their links.
+    RETURN_TYPES = ("VIDEO", "IMAGE")
+    RETURN_NAMES = ("video", "images")
     FUNCTION = "load"
     CATEGORY = "load-gif-as-video"
     DESCRIPTION = (
@@ -167,15 +171,20 @@ class LoadGifAsVideo:
         stacked = np.stack(source_frames)
         images = torch.from_numpy(stacked[np.arange(count) % len(source_frames)])
 
-        return (VideoFromComponents(VideoComponents(images=images, frame_rate=fps)),)
+        video = VideoFromComponents(VideoComponents(images=images, frame_rate=fps))
+        return (video, images)
 
     @classmethod
     def IS_CHANGED(cls, file, **kwargs):
+        if not file:
+            return float("nan")
         path = folder_paths.get_annotated_filepath(file)
         return os.path.getmtime(path)
 
     @classmethod
     def VALIDATE_INPUTS(cls, file, **kwargs):
+        if not file:
+            return "No animation file selected"
         if not folder_paths.exists_annotated_filepath(file):
             return f"Invalid animation file: {file}"
         return True
