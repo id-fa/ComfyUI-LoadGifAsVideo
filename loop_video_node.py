@@ -68,7 +68,7 @@ class LoopVideo:
     RETURN_TYPES = ("VIDEO",)
     RETURN_NAMES = ("video",)
     FUNCTION = "loop"
-    CATEGORY = "video"
+    CATEGORY = "load-gif-as-video"
     DESCRIPTION = (
         "Loops a video until the requested frame count, duration or number of "
         "playthroughs is filled, with an adjustable playback speed. Audio is "

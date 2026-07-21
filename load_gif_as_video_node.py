@@ -140,7 +140,7 @@ class LoadGifAsVideo:
     RETURN_TYPES = ("VIDEO",)
     RETURN_NAMES = ("video",)
     FUNCTION = "load"
-    CATEGORY = "video"
+    CATEGORY = "load-gif-as-video"
     DESCRIPTION = (
         "Loads an animated GIF/APNG/WEBP as a VIDEO stream. The animation loops "
         "until the requested frame count or duration is filled, and the playback "
