@@ -1,5 +1,7 @@
 # ComfyUI-LoadGifAsVideo
 
+![Screenshot1](docs/screenshot.webp)
+
 Two nodes for turning short looping material into a VIDEO stream of the length you actually need:
 
 - **Load GIF as Video** — reads an animated GIF / APNG / animated WEBP from the ComfyUI input directory.

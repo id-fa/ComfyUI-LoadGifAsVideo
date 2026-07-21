@@ -1,6 +1,6 @@
 [project]
 name = "load-gif-as-video"
-version = "0.0.3"
+version = "0.0.4"
 description = "Loads an animated GIF/APNG/WEBP as a VIDEO stream, and loops any VIDEO, with variable playback speed"
 readme = "README.md"
 license = {text = "MIT license"}
