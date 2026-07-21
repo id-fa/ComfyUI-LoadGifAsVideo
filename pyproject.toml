@@ -1,0 +1,20 @@
+[project]
+name = "load-gif-as-video"
+version = "0.0.3"
+description = "Loads an animated GIF/APNG/WEBP as a VIDEO stream, and loops any VIDEO, with variable playback speed"
+readme = "README.md"
+license = {text = "MIT license"}
+requires-python = ">=3.10"
+classifiers = []
+dependencies = [
+]
+
+[project.urls]
+Repository = "https://github.com/id-fa/ComfyUI-LoadGifAsVideo"
+
+[tool.comfy]
+PublisherId = "id-fa"
+DisplayName = "Load GIF as Video"
+Tags = []
+Repository = "https://github.com/id-fa/ComfyUI-LoadGifAsVideo"
+includes = []
