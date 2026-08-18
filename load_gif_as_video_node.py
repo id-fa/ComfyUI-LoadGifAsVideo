@@ -9,7 +9,12 @@ from PIL import Image, ImageSequence
 
 import folder_paths
 
-from .video_length import length_inputs, resolve_frame_count, scaled_frame_rate
+from .video_length import (
+    length_inputs,
+    resolve_frame_count,
+    scaled_frame_rate,
+    speed_baked_indices,
+)
 
 try:
     from comfy_api.input_impl import VideoFromComponents
@@ -169,9 +174,20 @@ class LoadGifAsVideo:
 
         # Looping is just a modulo over the source frames.
         stacked = np.stack(source_frames)
-        images = torch.from_numpy(stacked[np.arange(count) % len(source_frames)])
+        video_images = torch.from_numpy(stacked[np.arange(count) % len(source_frames)])
+        video = VideoFromComponents(
+            VideoComponents(images=video_images, frame_rate=fps)
+        )
 
-        video = VideoFromComponents(VideoComponents(images=images, frame_rate=fps))
+        # The VIDEO carries `speed` in its frame rate; an IMAGE batch cannot, so it
+        # gets the speed baked into its frames. At speed 1.0 both are the same
+        # frames, so reuse the tensor instead of building a second copy.
+        if float(speed) == 1.0:
+            images = video_images
+        else:
+            images = torch.from_numpy(
+                stacked[speed_baked_indices(count, len(source_frames), speed)]
+            )
         return (video, images)
 
     @classmethod

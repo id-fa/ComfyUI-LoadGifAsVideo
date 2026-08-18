@@ -2,6 +2,8 @@
 
 from fractions import Fraction
 
+import numpy as np
+
 LENGTH_MODES = ["frames", "seconds", "loops"]
 MAX_OUTPUT_FRAMES = 10000
 
@@ -56,7 +58,7 @@ def length_inputs(source_name="animation"):
                 "min": 0.01,
                 "max": 100.0,
                 "step": 0.05,
-                "tooltip": "Playback speed multiplier. Scales the output frame rate; frames are never interpolated or dropped.",
+                "tooltip": "Playback speed multiplier. Scales the VIDEO output's frame rate; the IMAGE batch, which has no frame rate, gets the speed baked into its frames instead.",
             },
         ),
     }
@@ -88,3 +90,34 @@ def resolve_frame_count(length_mode, frames, seconds, loops, fps, source_length)
             f"Requested {count} output frames, which exceeds the {MAX_OUTPUT_FRAMES} frame limit"
         )
     return count
+
+
+def speed_baked_indices(count, source_length, speed):
+    """Source-frame indices for the IMAGE output, with `speed` baked into the frames.
+
+    The VIDEO output expresses `speed` as a frame rate, but an IMAGE batch carries
+    no frame rate at all — hand it to `Create Video` or a Video Combine node and
+    the speed is simply lost. So the batch expresses the same speed change as
+    frames instead: it steps `speed` source frames per output frame, over however
+    many output frames fill the duration the VIDEO covers. Played back at the
+    source's own rate the batch is then the same length, and shows the same
+    motion, as the VIDEO output.
+
+    At `speed = 1.0` this is exactly `arange(count) % source_length`, so the batch
+    stays a frame-exact copy of the VIDEO frames.
+    """
+    ratio = Fraction(speed).limit_denominator(1000)
+    if ratio <= 0:
+        raise ValueError(f"Speed must be positive (speed={speed})")
+
+    image_count = max(1, round(Fraction(count) / ratio))
+    if image_count > MAX_OUTPUT_FRAMES:
+        raise ValueError(
+            f"speed={speed} needs {image_count} image frames to match the video's "
+            f"duration, which exceeds the {MAX_OUTPUT_FRAMES} frame limit"
+        )
+
+    # Integer math on the exact ratio: float `i * speed` can land a hair below an
+    # integer boundary and hold a frame one step too long.
+    steps = np.arange(image_count, dtype=np.int64) * ratio.numerator
+    return (steps // ratio.denominator) % source_length

@@ -4,7 +4,12 @@ import math
 
 import torch
 
-from .video_length import length_inputs, resolve_frame_count, scaled_frame_rate
+from .video_length import (
+    length_inputs,
+    resolve_frame_count,
+    scaled_frame_rate,
+    speed_baked_indices,
+)
 
 try:
     from comfy_api.input_impl import VideoFromComponents
@@ -106,7 +111,17 @@ class LoopVideo:
         video = VideoFromComponents(
             VideoComponents(images=looped, frame_rate=fps, audio=audio)
         )
-        return (video, looped)
+
+        # The VIDEO carries `speed` in its frame rate; an IMAGE batch cannot, so it
+        # gets the speed baked into its frames. At speed 1.0 both are the same
+        # frames, so reuse the tensor instead of building a second copy.
+        if float(speed) == 1.0:
+            batch = looped
+        else:
+            batch = images[
+                torch.from_numpy(speed_baked_indices(count, source_length, speed))
+            ]
+        return (video, batch)
 
 
 NODE_CLASS_MAPPINGS = {
