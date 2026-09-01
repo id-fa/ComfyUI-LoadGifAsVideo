@@ -82,6 +82,7 @@ Writes a VIDEO or an image batch out as an animated GIF. GIF holds at most 256 c
 | Output | Type | Description |
 | --- | --- | --- |
 | `images` | IMAGE | The dithered frames, byte for byte what went into the file. Handy for comparing settings without opening the GIF. |
+| `info` | STRING | What was written: file name, size in KB and bytes, frame count, canvas size, frame rate, running time, palette size and dither. Connect it to the stock **Preview as Text** node to see it. |
 
 #### Quantizers
 
@@ -199,6 +200,17 @@ So slowing down duplicates frames into `images`, and speeding up drops them. If 
 **Very short delays.** GIFs that declare a delay of 0ms or 10ms mean "as fast as possible"; browsers render those at 100ms and so does this node.
 
 ### Save as GIF only
+
+**Seeing the file size.** The `info` output reports what was actually written, which is the number worth watching while tuning `colors`, `dither`, `fps` and `halftone_size`:
+
+```
+ComfyUI_00042_.gif
+106.2 KB (108,758 bytes)
+12 frames · 192×192 · 12 fps · 1.00 s
+64 colors · floyd-steinberg
+```
+
+Connect it to the stock **Preview as Text** node (`PreviewAny`) to read it in the graph. It is a normal STRING, so it can also be fed anywhere else a string goes.
 
 **Dropping frames.** `fps` is the rate the GIF is written at, and lowering it past the source rate drops frames rather than slowing the animation down. 60 frames of 30fps material at `fps = 10` becomes 20 frames that still run for two seconds. This is the cheapest control over file size there is — roughly linear, and unlike `colors` or `dither` it costs nothing in the frames that remain:
 
@@ -350,6 +362,7 @@ VIDEO または画像バッチをアニメーション GIF として書き出し
 | 出力 | 型 | 説明 |
 | --- | --- | --- |
 | `images` | IMAGE | ディザ後のフレーム。ファイルに書き込まれたものとバイト単位で同一です。GIF を開かずに設定を比較するのに使えます。 |
+| `info` | STRING | 書き出した内容。ファイル名、サイズ（KB とバイト数）、フレーム数、キャンバスサイズ、フレームレート、再生時間、パレット色数、ディザ方式。標準の Preview as Text ノードに繋ぐと表示できます。 |
 
 #### 減色アルゴリズム（quantizer）
 
@@ -467,6 +480,17 @@ IMAGE バッチはフレームレートを持ちません。そのため `video`
 **極端に短いディレイ。** ディレイに 0ms や 10ms を指定した GIF は「できるだけ速く」という意味です。ブラウザはこれを 100ms で再生するので、このノードも同じ扱いにします。
 
 ### Save as GIF のみ
+
+**ファイルサイズの確認。** `info` 出力には実際に書き出した内容が入ります。`colors`、`dither`、`fps`、`halftone_size` を調整するときに見るべき数字です。
+
+```
+ComfyUI_00042_.gif
+106.2 KB (108,758 bytes)
+12 frames · 192×192 · 12 fps · 1.00 s
+64 colors · floyd-steinberg
+```
+
+標準の Preview as Text ノード（`PreviewAny`）に繋ぐとグラフ上で読めます。ただの STRING なので、文字列を受け取る他のノードにも渡せます。
 
 **フレームの間引き。** `fps` は GIF に書き込まれるフレームレートで、元のレートより下げるとアニメーションが遅くなるのではなくフレームが間引かれます。30fps 素材 60 フレームを `fps = 10` にすると 20 フレームになり、再生時間は 2 秒のままです。ファイルサイズに対して最も効果的なつまみで、削減はほぼ線形、しかも `colors` や `dither` と違って残ったフレームの画質は一切落ちません。
 

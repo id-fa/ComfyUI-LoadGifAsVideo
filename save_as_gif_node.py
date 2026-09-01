@@ -380,8 +380,9 @@ class SaveAsGif:
             },
         }
 
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("images",)
+    # `info` is appended, never inserted — existing workflows keep their links.
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("images", "info")
     FUNCTION = "save"
     OUTPUT_NODE = True
     CATEGORY = "load-gif-as-video"
@@ -495,6 +496,7 @@ class SaveAsGif:
 
         progress = ProgressBar(count) if ProgressBar is not None else None
         pages = []
+        colors_written = 0
         result = np.empty((count, canvas_h, canvas_w, 3), dtype=np.uint8)
         for i in range(count):
             ditherer, palette = shared, shared_palette
@@ -526,6 +528,9 @@ class SaveAsGif:
 
             result[i] = palette[indices]
             pages.append(_page(indices, palette))
+            # Reported in `info`. Under `per_frame` this ends up being the last
+            # frame's count, which is the honest answer — there is no single one.
+            colors_written = len(palette)
             if progress is not None:
                 progress.update(1)
 
@@ -536,6 +541,7 @@ class SaveAsGif:
             )
         )
         file = f"{filename}_{counter:05}_.gif"
+        path = os.path.join(full_output_folder, file)
         # Handing Pillow the palette is what keeps a shared palette shared: without
         # it every frame after the first is written with its own copy of the color
         # table, which on a 256-color GIF is 768 wasted bytes per frame. Per-frame
@@ -546,16 +552,32 @@ class SaveAsGif:
             options["palette"] = shared_palette.reshape(-1).tobytes()
         if letterboxed:
             options["transparency"] = 0
+        delays = _frame_delays(count, float(frame_rate))
         pages[0].save(
-            os.path.join(full_output_folder, file),
+            path,
             save_all=True,
             append_images=pages[1:],
-            duration=_frame_delays(count, float(frame_rate)),
+            duration=delays,
             loop=loop_count,
             # Pillow's `optimize` rebuilds the palette to the colors a frame
             # actually uses, which would undo a deliberately shared global one.
             optimize=False,
             **options,
+        )
+
+        written = os.path.getsize(path)
+        # The file size is the number people actually tune for, so report it back
+        # rather than making them go and look. `PreviewAny` ("Preview as Text")
+        # renders this straight; `ui.text` matches the shape that node emits, in
+        # case the frontend ever generalizes its text preview beyond it.
+        info = "\n".join(
+            [
+                file,
+                f"{written / 1024:,.1f} KB ({written:,} bytes)",
+                f"{count} frames · {canvas_w}×{canvas_h} · "
+                f"{float(frame_rate):.4g} fps · {sum(delays) / 1000.0:.2f} s",
+                f"{colors_written} colors · {dither}",
+            ]
         )
 
         return {
@@ -572,9 +594,12 @@ class SaveAsGif:
             # image. Without the flag it takes the image path and animates on its
             # own, because that is what an <img> does with a GIF.
             "ui": {
-                "images": [{"filename": file, "subfolder": subfolder, "type": "output"}]
+                "images": [
+                    {"filename": file, "subfolder": subfolder, "type": "output"}
+                ],
+                "text": (info,),
             },
-            "result": (torch.from_numpy(result.astype(np.float32) / 255.0),),
+            "result": (torch.from_numpy(result.astype(np.float32) / 255.0), info),
         }
 
 
