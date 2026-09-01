@@ -17,6 +17,8 @@ from .gif_dither import (
     DITHER_METHODS,
     HALFTONE_INKS,
     MAX_HALFTONE_SIZE,
+    MASK_DITHERS,
+    MASK_INK_COLORS,
     MAX_HALFTONE_STEPS,
     MIN_HALFTONE_SIZE,
     POSTER_DITHERS,
@@ -156,6 +158,20 @@ def _spare_color(palette):
                 if (red, green, blue) not in used:
                     return (red, green, blue)
     raise RuntimeError("Palette leaves no color free for transparency")
+
+
+def _with_ink(palette, ink):
+    """`palette` guaranteed to hold the mask screen's ink color exactly.
+
+    A mask screen paints its dot one flat color, and `halftone_ink` names which:
+    real black or real white, not "whatever the adaptive palette had nearest".
+    On a photographic palette the nearest entry to black is often a dark blue,
+    which would make the screen read as a tint rather than as ink.
+    """
+    target = np.array(MASK_INK_COLORS[ink], dtype=np.uint8)
+    if (palette == target).all(1).any():
+        return palette
+    return np.vstack([palette, target]).astype(np.uint8)
 
 
 def _with_transparency(palette):
@@ -299,7 +315,7 @@ class SaveAsGif:
                     DITHER_METHODS,
                     {
                         "default": "floyd-steinberg",
-                        "tooltip": "How colors the palette does not hold are approximated. Error diffusion looks cleanest on photographic frames; the ordered and halftone screens are stable frame to frame, so they do not crawl on animation. halftone/halftone-square cap a cell at two colors for a printed-ink look; their -ordered variants lift that cap for smoother tone. The -poster pair is ImageMagick's -ordered-dither: it ignores the palette entirely and rounds each channel to an even RGB grid, throwing away most of the tone for a much smaller file.",
+                        "tooltip": "How colors the palette does not hold are approximated. Error diffusion looks cleanest on photographic frames; the ordered and halftone screens are stable frame to frame, so they do not crawl on animation. halftone/halftone-square cap a cell at two colors for a printed-ink look; their -ordered variants lift that cap for smoother tone. The -mask pair lays a single flat ink dot (the halftone_ink color) over the picture and leaves the rest of the frame alone; its lattice is the same in every frame, so it never crawls. The -poster pair is ImageMagick's -ordered-dither: it ignores the palette entirely and rounds each channel to an even RGB grid, throwing away most of the tone for a much smaller file.",
                     },
                 ),
                 "dither_strength": (
@@ -309,7 +325,7 @@ class SaveAsGif:
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.05,
-                        "tooltip": "How much of the quantization error is dithered away. 0 disables the dither entirely; lower values trade banding back for less noise.",
+                        "tooltip": "How much of the quantization error is dithered away. 0 disables the dither entirely; lower values trade banding back for less noise. For the -mask dithers this is the screen's coverage instead: how much of each cell the dot fills, reaching half at 1.0.",
                     },
                 ),
                 "halftone_size": (
@@ -329,14 +345,14 @@ class SaveAsGif:
                         "min": 0,
                         "max": MAX_HALFTONE_STEPS,
                         "step": 1,
-                        "tooltip": "How many tonal steps one halftone cell resolves. 0 gives one per cell, which is what the cell size implies on its own. Setting it lower separates the dot size from the tone: big dots with coarse tone, which is the smallest a halftone gets.",
+                        "tooltip": "How many tonal steps one halftone cell resolves. 0 gives one per cell, which is what the cell size implies on its own. Setting it lower separates the dot size from the tone: big dots with coarse tone, which is the smallest a halftone gets. Ignored by the -mask dithers, whose dot is one fixed size.",
                     },
                 ),
                 "halftone_ink": (
                     HALFTONE_INKS,
                     {
                         "default": "black",
-                        "tooltip": "Which end of the tonal range the halftone dot grows from. black: dark dots on a light ground, the way ink sits on paper. white: light dots out of a dark ground.",
+                        "tooltip": "Which end of the tonal range the halftone dot grows from. black: dark dots on a light ground, the way ink sits on paper. white: light dots out of a dark ground. For the -mask dithers this names the ink itself — real black or real white — and it is reserved in the palette.",
                     },
                 ),
                 "loop_count": (
@@ -448,15 +464,22 @@ class SaveAsGif:
         if dither in POSTER_DITHERS:
             grid_palette, _ = uniform_palette(palette_size)
 
+        # A mask screen paints its dot in one fixed ink, so that color has to be
+        # an entry; give up a slot for it rather than settle for the nearest.
+        masked = dither in MASK_DITHERS
+        if masked:
+            palette_size = max(2, palette_size - 1)
+
+        def palette_for(source):
+            if grid_palette is not None:
+                return grid_palette
+            palette = build_palette(source, palette_size, quantizer, dithered)
+            return _with_ink(palette, halftone_ink) if masked else palette
+
         shared = None
         if grid_palette is not None or palette_scope == "global":
-            base = (
-                grid_palette
-                if grid_palette is not None
-                else build_palette(frames, palette_size, quantizer, dithered)
-            )
             shared = Ditherer(
-                base,
+                palette_for(frames),
                 dither,
                 dither_strength,
                 halftone_size,
@@ -477,7 +500,7 @@ class SaveAsGif:
             ditherer, palette = shared, shared_palette
             if ditherer is None:
                 ditherer = Ditherer(
-                    build_palette(frames[i : i + 1], palette_size, quantizer, dithered),
+                    palette_for(frames[i : i + 1]),
                     dither,
                     dither_strength,
                     halftone_size,

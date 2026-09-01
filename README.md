@@ -109,7 +109,22 @@ The two diversity choosers also pick *differently* when dithering is on: they le
 | `random-64x64` | Ordered | A 64×64 matrix with no repeating figure, in the spirit of gifsicle's `ro64`. Even grain without the Bayer weave. |
 | `halftone`, `halftone-square` | Ordered | Newsprint **screens**: a triangular and a square dot lattice, sized by `halftone_size` and polarised by `halftone_ink`. Each cell is limited to two palette colors — ink and ground — which is what makes them read as printed halftone. |
 | `halftone-ordered`, `halftone-square-ordered` | Ordered | The same dot geometry with the two-color limit lifted, so a cell may use as many palette entries as it needs. An ordinary ordered dither on a halftone lattice: the dots stay visible but carry tone rather than just coverage, giving smoother gradients and softer edges than the screens above, at a slightly larger file. |
+| `halftone-mask`, `halftone-square-mask` | Ordered | A **single-colour** dot screen laid over the picture. The dot is exactly the `halftone_ink` colour — real black or real white — and everything it does not cover keeps the frame's own quantized colour. The lattice is **identical in every frame**, so it never crawls. See [Mask screens](#mask-screens). |
 | `halftone-poster`, `halftone-square-poster` | Ordered | ImageMagick's `-ordered-dither`. **These do not search the palette at all** — each channel is rounded on its own against the screen, so the picture collapses onto an even RGB grid and the dots are left carrying it. At 8 colors that is the corners of the RGB cube: hard primaries, heavy pattern, and by far the smallest file of anything here. See [Poster dithers](#poster-dithers). |
+
+#### Mask screens
+
+Every other halftone here decides a covered pixel's colour *from that pixel*, so a single dot ends up holding several colours — the pixels under one dot are not all the same colour in the source, and on the poster dithers the R/G/B dots come out slightly different sizes and leave a fringe around the rim.
+
+`halftone-mask` and `halftone-square-mask` paint every covered pixel the **same** ink instead. A dot is one flat colour, and the frame outside the dots is left as its plain nearest palette colour:
+
+- `halftone_ink` names the actual ink — `black` is `#000000`, `white` is `#ffffff`. That colour is guaranteed to be in the palette, which costs one entry, so `colors` = 32 gives 31 adaptive colours plus the ink.
+- **The screen is fixed.** Same lattice, same dot size, in every frame — it depends on nothing but the frame's dimensions. A screen that tracked each frame's tone would make the dot rims flicker wherever the picture changed by even one level; measured on a 12-frame clip, a tone-following screen moved 12246 dot pixels, this one moves zero.
+- Tone is carried entirely by the ground showing through the gaps, not by the dot size.
+- `dither_strength` sets how much of each cell the dot covers, reaching half at `1.0` — half is where a dot screen carries the most, with dot and gap the same size, and past it the gaps close and the picture disappears. `0.5` covers a quarter, `0` removes the screen.
+- `halftone_size` sets the cell width, so it is the dot pitch. `halftone_steps` has nothing to quantize here and is ignored.
+
+Unlike the poster dithers, these keep the picture's own colours in the ground — the screen masks the image rather than replacing it.
 
 #### Poster dithers
 
@@ -362,7 +377,22 @@ diversity 系の 2 つは、ディザを掛けるかどうかで選ぶ色その�
 | `random-64x64` | 順序ディザ | 繰り返し模様を持たない 64×64 行列。gifsicle の `ro64` に相当する位置づけで、Bayer 特有の織り目なしに均一な粒状感が得られます。 |
 | `halftone`, `halftone-square` | 順序ディザ | 網点スクリーン。三角格子と正方格子の 2 種類で、大きさは `halftone_size`、極性は `halftone_ink` で決まります。各セルをパレット 2 色（インクと地）に制限しており、これが印刷の網点らしく見える理由です。 |
 | `halftone-ordered`, `halftone-square-ordered` | 順序ディザ | 同じ網点配置のまま 2 色制限を外したもの。1 セルが必要なだけパレット色を使えます。ハーフトーン格子の上で動く普通の順序ディザで、網点の形は残しつつ、点が被覆率だけでなく濃淡も持ちます。上の 2 つよりグラデーションが滑らかでエッジも柔らかい代わり、ファイルは少し大きくなります。 |
+| `halftone-mask`, `halftone-square-mask` | 順序ディザ | 元絵の上に重ねる単色の網点。ドットは `halftone_ink` で指定した色そのもの（純黒または純白）で塗られ、ドットが覆わない部分は元フレームの色がそのまま残ります。格子は全フレームで完全に同一なので、模様が這い回りません。[マスクスクリーン](#マスクスクリーン)を参照。 |
 | `halftone-poster`, `halftone-square-poster` | 順序ディザ | ImageMagick の `-ordered-dither`。パレット探索を一切行いません — 各チャンネルを網点スクリーンに対して独立に丸めるため、絵は均等な RGB グリッドに潰れ、網点だけが画を担うことになります。8 色なら RGB キューブの 8 頂点そのもので、原色が強く出てパターンも濃く、ファイルは本ノード中で群を抜いて小さくなります。[ポスタライズ系ディザ](#ポスタライズ系ディザ)を参照。 |
+
+#### マスクスクリーン
+
+他の網点はすべて、覆われたピクセルの色をそのピクセル自身から決めます。そのため 1 つのドットが複数の色を持つことになります（1 つのドットの下にあるピクセルは、元画像では同じ色ではないため）。ポスタライズ系では R/G/B のドットサイズがわずかにずれ、ドットの縁に色の輪郭が出ます。
+
+`halftone-mask` と `halftone-square-mask` は、覆われたピクセルをすべて同じインクで塗ります。ドットは 1 色のベタになり、ドットの外側は元フレームの最近傍パレット色のまま残ります。
+
+- `halftone_ink` がインクの色そのものを指定します。`black` は `#000000`、`white` は `#ffffff` です。この色は必ずパレットに入るため 1 エントリを消費し、`colors` = 32 なら適応パレット 31 色 + インクになります。
+- 網点は固定です。格子の位置もドットの大きさも全フレームで同一で、フレームのサイズ以外には一切依存しません。フレームごとの明暗に追従する網点にすると、絵が 1 階調変わっただけでドットの縁が切り替わってちらつきます。12 フレームのクリップでの実測では、明暗追従型は 12246 ピクセルのドットが変化したのに対し、この方式は 0 です。
+- 階調は、網点の隙間から見える地が担います。ドットの大きさは階調を表しません。
+- `dither_strength` はセルのどれだけをドットが覆うかを決め、`1.0` で半分になります。ドットと隙間が同じ大きさになる被覆率 50% が網点として最も情報を運べる状態で、それを超えると隙間が閉じて下の絵が見えなくなるためです。`0.5` で 25%、`0` で網点なしです。
+- `halftone_size` はセル幅、つまり網点のピッチを決めます。`halftone_steps` はここでは量子化する対象がないため無視されます。
+
+ポスタライズ系と違い、地には元絵の色が残ります。画像を置き換えるのではなく、網でマスクする方式です。
 
 #### ポスタライズ系ディザ
 

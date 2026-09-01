@@ -10,7 +10,7 @@ A ComfyUI custom node package with three nodes. `README.md` is the user-facing s
 - `LoopVideo` ("Loop Video", `loop_video_node.py`) — takes any `VIDEO` in and loops it to the requested length. This is how short MP4s are handled: `Load Video` → `LoopVideo`.
 - `SaveAsGif` ("Save as GIF", `save_as_gif_node.py`) — the other direction: quantizes and dithers a `VIDEO` or an `IMAGE` batch and writes an animated GIF. `gif_palette.py` holds the quantizers, `gif_dither.py` the dithers.
 
-`video_length.py` holds what they share: the `length_mode`/`frames`/`seconds`/`loops`/`speed` widget block (`length_inputs`) and the count math (`scaled_frame_rate`, `resolve_frame_count`, `speed_baked_indices`). `__init__.py` merges all three modules' mappings. There is no frontend JS and no `WEB_DIRECTORY`. No Python dependencies beyond what ComfyUI already ships (Pillow, NumPy, PyTorch).
+`video_length.py` holds what they share: the `length_mode`/`frames`/`seconds`/`loops`/`speed` widget block (`length_inputs`) and the count math (`scaled_frame_rate`, `resolve_frame_count`, `speed_baked_indices`). `__init__.py` merges all three modules' mappings. The one piece of frontend JS is `web/save_as_gif_preview.js`, which exists solely to stop the preview treating `SaveAsGif` as a video node — see *The preview payload*. No Python dependencies beyond what ComfyUI already ships (Pillow, NumPy, PyTorch).
 
 **Why MP4 is a second node rather than more extensions in the file combo.** The decode problem (frame delays, disposal, alpha, variable timing) is entirely GIF-specific and shares no code with PyAV decoding; the loop/length/speed problem is entirely source-agnostic. Splitting along that seam also avoids reimplementing a worse `Load Video`, and lets `LoopVideo` loop *any* VIDEO, including generated ones. Do not add `.mp4`/`.webm` to `_ANIMATION_EXTENSIONS`.
 
@@ -94,6 +94,17 @@ Three details here are load-bearing and easy to undo by accident:
 
 `scratchpad`-style verification for this lives in the test scripts described under *Commands*; the round trip (file read back == the `images` output) is exact for every scope × dither combination.
 
+#### The mask screens
+
+`_mask` is the third algorithm sharing the screen matrix, and it exists because of a distinction that is easy to miss: **`nc = 2` limits a *plan* to two colors, not a *cell*.** Pixels under one dot have different source colors, so they look up different plans and a dot ends up multi-colored no matter how tight the plan limit is. The only way to get a flat dot is to stop deriving the covered pixel's color from that pixel — which is what `_mask` does, painting every covered pixel one fixed ink and leaving the rest as the plain nearest color.
+
+- **The ink is a real black or white, reserved in the palette by `save()`.** `_with_ink` appends it when the adaptive palette lacks it, and `palette_size` drops by one to pay for it. Nearest-match to a photographic palette would land on a dark blue and read as a tint, not as ink.
+- **The screen does not depend on the frame at all.** `_screen(height, width)` is a function of the frame size and nothing else, cached on the `Ditherer`. This is deliberate and was a fix: an earlier version set coverage from each frame's own luminance, which is what a halftone normally does, and the dot rims then flickered wherever the picture moved — measured at 12246 dot pixels changing across a 12-frame clip, against zero now. **Do not reintroduce tone-following coverage here**; a screen that tracks tone is what the other three families already are.
+- **Tone lives in the ground, not in the dot.** Since dot size is constant, the picture comes through the gaps. That is also why `halftone_steps` does nothing for these — there is no tonal ladder to quantize.
+- **`dither_strength` is the coverage**, mapped so full strength is `_MASK_FULL_COVERAGE = 0.5`. Half is where a dot screen carries the most (dot and gap equal); mapping 1.0 to a solid fill would make the default setting paint the frame over.
+- **`_ordered_matrix` does not flip the matrix for these.** Everywhere else `halftone_ink = white` reverses the screen; here the ink is named directly, and with a fixed screen a flip would only move the lattice, not change the tone.
+- The ground keeps the source's colors, so a mask screen masks the picture where a poster dither replaces it. That is the difference worth keeping in mind when picking between them.
+
 #### The poster (channel-independent) dithers
 
 `_poster` is a different algorithm from `_ordered`, sharing only the screen matrix. It scales each channel onto `levels - 1`, compares the leftover fraction against the screen, and computes the palette index arithmetically (`r*L² + g*L + b`) — no distance search anywhere, which is why it runs in ~0.3 ms against ~20 ms for the plan-based screens.
@@ -138,6 +149,32 @@ function isVideoOutput(e) {
 
 `.webp` and `.png` are hardcoded exceptions; a `.gif` is on neither list, so setting `animated` routes the result to the video player, whose `getVideoFilename` does `new URL(path)`, throws, and renders **"Invalid URL"** instead of the image. `isAnimatedOutput` also short-circuits `isImageOutputs`, so the image path is skipped entirely. Without the flag the result takes the image path and animates by itself, because that is simply what an `<img>` does with a GIF. Do not add `animated` back by analogy with the WEBP node — the analogy is what breaks it.
 
+**Dropping the flag is not enough on its own, because a VIDEO *input slot* also forces the video path.** Nodes 2.0 decides like this:
+
+```ts
+// renderer/extensions/vueNodes/components/LGraphNode.vue
+const type =
+  isVideoOutput(newOutputs) ||
+  node.previewMediaType === 'video' ||
+  (!node.previewMediaType && hasVideoInput.value)
+    ? 'video' : 'image'
+
+const hasVideoInput = computed(() =>
+  lgraphNode.value?.inputs?.some((input) => input.type === 'VIDEO') ?? false)
+```
+
+`hasVideoInput` counts the **slot**, not a link, so `SaveAsGif`'s optional `video` input makes every fresh node a video node regardless of what the backend returns. Nothing in the `ui` payload can defeat that. `web/save_as_gif_preview.js` therefore sets `node.previewMediaType = "image"` in `nodeCreated`, which fails the `!node.previewMediaType` guard and keeps the result on the image path; the same property also short-circuits the old LiteGraph UI's `isVideoNode()`, so one line covers both. **That script is the only reason this package has a `WEB_DIRECTORY`** — the alternative was dropping the VIDEO input, which would cost the direct `Load GIF as Video` / `Loop Video` → `Save as GIF` wiring the package exists for.
+
+**The misclassification also sticks to the node, which makes this look unfixed after it is fixed.** The full branch is `isVideoOutput(o) || isVideoNode(this)`, and the preview helpers stamp the node on their way through:
+
+```js
+useNodeImage = (e, t) => { e.previewMediaType = `image`; ... }
+useNodeVideo = (e, t) => { e.previewMediaType = `video`; ... }
+function isVideoNode(e) { return e ? e.previewMediaType === `video` || !!e.videoContainer : false }
+```
+
+So a node that was once sent to the video player keeps `previewMediaType = "video"` and takes the video path forever after, no matter what the backend now returns — a self-sustaining loop, since only the image path would clear it. It is a runtime property (not serialized into the workflow) and `videoContainer` is a DOM node, so **a browser reload clears both**; a server restart alone does not. If someone reports "Invalid URL" while the `ui` payload is provably correct, that is the reason: tell them to reload the page, not to change the payload.
+
 #### Frame delays
 
 `_frame_delays` emits the *difference between consecutive rounded playback times*, not one rounded delay repeated. At 12fps that is 8, 9, 8, 8, 9… centiseconds; repeating `round(100/12) = 8` would run the animation 4% short and drift visibly on a long clip. The 2cs floor matches the `_MIN_DELAY_MS = 20` clamp on the read side and caps output at 50fps, which is the format's real ceiling.
@@ -172,10 +209,11 @@ There are no tests in the repo. The GIF path was verified with throwaway scripts
 5. the GIF byte stream itself, parsed by hand, having zero local color tables under `palette_scope = global`,
 6. written file size falling monotonically as `halftone_size` grows — **on material with flat areas**; `make_batch`-style noise over a gradient will not show it,
 7. `fps` below `source_fps` producing `round(count * fps / source_fps)` frames with the running time unchanged, and `fps` at or above it changing nothing,
-8. `uniform_palette` levels at each cube boundary and its `r*L²+g*L+b` index order, poster output staying on the grid, poster refusing a non-cubic palette, poster at strength 0 matching the plain nearest color, and the written GIF's color table being exactly the grid size,
-9. `halftone_steps` clamping the plan to `min(steps, cells, 255)` with a contiguous 0..n-1 matrix for every screen, `steps=255` reproducing `steps=0` byte for byte, and 2 steps beating `auto` on file size,
-10. the `ui` payload's exact shape — one entry, the three expected keys, a `.gif` filename with no path separator, and **no `animated` key**,
-11. the canvas size in the GIF header, a transparent index appearing only when the aspect ratios disagree, and — via `convert("RGBA")` — the bars reading alpha 0 while the picture area reads alpha 255.
+8. mask screens using the exact `halftone_ink` RGB, that color reaching the written GIF, every covered pixel being the ink across wildly different frames (the lattice must not move), coverage rising with `dither_strength` to ~0.5 at full, and the uncovered ground matching a plain nearest-color pass,
+9. `uniform_palette` levels at each cube boundary and its `r*L²+g*L+b` index order, poster output staying on the grid, poster refusing a non-cubic palette, poster at strength 0 matching the plain nearest color, and the written GIF's color table being exactly the grid size,
+10. `halftone_steps` clamping the plan to `min(steps, cells, 255)` with a contiguous 0..n-1 matrix for every screen, `steps=255` reproducing `steps=0` byte for byte, and 2 steps beating `auto` on file size,
+11. the `ui` payload's exact shape — one entry, the three expected keys, a `.gif` filename with no path separator, and **no `animated` key**,
+12. the canvas size in the GIF header, a transparent index appearing only when the aspect ratios disagree, and — via `convert("RGBA")` — the bars reading alpha 0 while the picture area reads alpha 255.
 
  Both nodes were verified against the real ComfyUI at `E:\_BIN\StabilityMatrix\Data\Packages\ComfyUI` by stubbing `folder_paths`, loading this directory as a package via `importlib.util.spec_from_file_location(..., submodule_search_locations=[PKG])` (needed now that the modules use relative imports — the hyphenated directory name is not importable directly) with that ComfyUI on `sys.path`, and round-tripping results through `save_to()` + PyAV readback.
 

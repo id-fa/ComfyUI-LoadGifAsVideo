@@ -117,32 +117,53 @@ _ORDERED = [
     "halftone-square-ordered",
     "halftone-poster",
     "halftone-square-poster",
+    "halftone-mask",
+    "halftone-square-mask",
 ]
 
-# The halftone screens, as (triangular lattice?, colors allowed per cell,
-# channel-independent?). Three families share one dot geometry:
+# The halftone screens, as (triangular lattice?, colors allowed per cell, kind).
+# Four families share one dot geometry and differ only in how a covered pixel
+# gets its color:
 #
-# - The two-color pair are true halftone *screens*: a cell alternates between
-#   exactly two palette entries, which is what makes it read as printed ink.
-# - The `-ordered` pair lifts that limit, so a cell may hold as many palette
-#   entries as the plan does. The dots stay but carry tone as well as coverage —
-#   an ordinary ordered dither on a halftone lattice.
-# - The `-poster` pair is ImageMagick's `-ordered-dither`: it does not search the
-#   palette at all, it rounds each channel on its own against the screen. That is
-#   what collapses the picture onto a handful of primaries and throws away most
-#   of the original tone, which is the whole point of it.
+# - "plan" with a 2-color limit is a true halftone *screen*: a cell alternates
+#   between two palette entries, which is what makes it read as printed ink.
+# - "plan" with no limit (`-ordered`) lets a cell hold as many entries as the
+#   plan does. The dots stay but carry tone as well as coverage — an ordinary
+#   ordered dither on a halftone lattice.
+# - "poster" is ImageMagick's `-ordered-dither`: it does not search the palette
+#   at all, it rounds each channel on its own against the screen. That collapses
+#   the picture onto a handful of primaries, which is the whole point of it.
+# - "mask" lays a *single-color* dot over the picture. Every other family decides
+#   a covered pixel's color from that pixel, so a dot ends up holding several
+#   colors; this one paints every covered pixel the same ink and leaves the rest
+#   of the frame alone. The screen carries the shading, the ground keeps the hue.
 _HALFTONE_SCREENS = {
-    "halftone": (True, 2, False),
-    "halftone-square": (False, 2, False),
-    "halftone-ordered": (True, None, False),
-    "halftone-square-ordered": (False, None, False),
-    "halftone-poster": (True, None, True),
-    "halftone-square-poster": (False, None, True),
+    "halftone": (True, 2, "plan"),
+    "halftone-square": (False, 2, "plan"),
+    "halftone-ordered": (True, None, "plan"),
+    "halftone-square-ordered": (False, None, "plan"),
+    "halftone-poster": (True, None, "poster"),
+    "halftone-square-poster": (False, None, "poster"),
+    "halftone-mask": (True, None, "mask"),
+    "halftone-square-mask": (False, None, "mask"),
 }
 
 # The dithers that quantize each channel on its own and therefore dictate their
 # own palette: an even RGB grid, not an adaptive one. `SaveAsGif` checks this.
-POSTER_DITHERS = [m for m, (_, _, poster) in _HALFTONE_SCREENS.items() if poster]
+POSTER_DITHERS = [m for m, (_, _, k) in _HALFTONE_SCREENS.items() if k == "poster"]
+
+# The dithers that paint their dot in one fixed color, so `SaveAsGif` has to make
+# sure that color is actually in the palette.
+MASK_DITHERS = [m for m, (_, _, k) in _HALFTONE_SCREENS.items() if k == "mask"]
+
+# The ink a mask screen paints with, by `halftone_ink`.
+MASK_INK_COLORS = {"black": (0, 0, 0), "white": (255, 255, 255)}
+
+# Cell coverage a mask screen reaches at `dither_strength = 1`. Half is where a
+# dot screen carries the most — dot and gap the same size. Past that the gaps
+# close and the picture underneath disappears, so full strength is mapped here
+# rather than to a solid fill.
+_MASK_FULL_COVERAGE = 0.5
 
 DITHER_METHODS = ["none", *_DIFFUSION, *_ORDERED]
 
@@ -274,7 +295,7 @@ def _ordered_matrix(method, halftone_size, halftone_ink, halftone_steps=0):
         return _random_ordered(), 16, 16
     if method not in _HALFTONE_SCREENS:
         raise ValueError(f"Unknown ordered dither: {method}")
-    triangular, max_colors, _ = _HALFTONE_SCREENS[method]
+    triangular, max_colors, kind = _HALFTONE_SCREENS[method]
 
     size = int(halftone_size)
     if not MIN_HALFTONE_SIZE <= size <= MAX_HALFTONE_SIZE:
@@ -297,11 +318,14 @@ def _ordered_matrix(method, halftone_size, halftone_ink, halftone_steps=0):
     else:
         matrix, nplan = _halftone(size, size, False, steps)
 
-    if halftone_ink == "white":
+    if halftone_ink == "white" and kind != "mask":
         # Plans run dark to light and the matrix runs outward from the dot center,
         # so cell 0 normally takes the darkest color: a dark dot growing on a
         # light ground, the way ink sits on paper. Reversing the matrix grows the
         # light color out of a dark ground instead.
+        #
+        # A mask screen skips this: there `halftone_ink` names the actual ink, and
+        # the polarity comes out of which end of the tone range grows the dot.
         matrix = nplan - 1 - matrix
 
     # `None` means no limit: the plan keeps whatever colors approximate the source
@@ -500,6 +524,19 @@ class Ditherer:
         # grid, so its palette has to be exactly that; the level count is read
         # back from the palette rather than passed in, which also checks the
         # caller handed over the right thing.
+        # A mask screen paints every covered pixel one ink color, so it needs that
+        # color's index. The caller is expected to have put it in the palette;
+        # nearest-match rather than an exact lookup keeps a hand-built palette
+        # working, at the cost of a slightly off ink.
+        self.is_mask = method in MASK_DITHERS
+        self._ink_index = 0
+        self._screen_cache = None
+        if self.is_mask:
+            target = np.array([MASK_INK_COLORS[halftone_ink]], dtype=np.float32)
+            self._ink_index = int(
+                nearest_index(target, self._palette_f, self._palette_sq)[0]
+            )
+
         self.is_poster = method in POSTER_DITHERS
         self._levels = 0
         if self.is_poster:
@@ -540,7 +577,58 @@ class Ditherer:
                 self.strength,
             )
 
+        if self.is_mask:
+            return self._mask(frame)
         return self._poster(frame) if self.is_poster else self._ordered(frame)
+
+    def _screen(self, height, width):
+        """The fixed dot lattice for a frame of this size, cached.
+
+        It depends on nothing but the frame's dimensions, so every frame of a clip
+        gets the identical screen — the lattice does not move, and a dot does not
+        change size from frame to frame. That stability is the whole point of a
+        mask screen: a screen that tracked each frame's tone would make the dot
+        rims flicker wherever the picture changed by even one level.
+        """
+        if self._screen_cache is None or self._screen_cache[0] != (height, width):
+            mh, mw = self._matrix.shape
+            cell = self._matrix[
+                np.arange(height)[:, None] % mh, np.arange(width)[None, :] % mw
+            ]
+            coverage = self.strength * _MASK_FULL_COVERAGE
+            self._screen_cache = (
+                (height, width),
+                coverage > (cell + 0.5) / self._nplan,
+            )
+        return self._screen_cache[1]
+
+    def _mask(self, frame):
+        """A single-color dot screen laid over the picture.
+
+        Every other screen here decides a covered pixel's color *from that pixel*,
+        which is why a dot ends up holding several colors — the pixels under one
+        dot are not all the same color in the source. This one paints every
+        covered pixel the same ink instead, and leaves everything the dot misses
+        as the plain nearest palette color. So a dot really is one flat color, and
+        the picture shows through the gaps between the dots.
+
+        The screen is fixed: same lattice, same dot size, every frame. Tone is
+        carried entirely by the ground, not by the dots. `dither_strength` sets
+        how much of each cell the dot covers, up to half at full strength.
+        """
+        height, width = frame.shape[:2]
+        covered = self._screen(height, width)
+
+        flat = frame.reshape(-1, 3).astype(np.float32)
+        ground = np.empty(len(flat), dtype=np.uint8)
+        for begin in range(0, len(flat), 1 << 16):
+            block = flat[begin : begin + (1 << 16)]
+            ground[begin : begin + len(block)] = nearest_index(
+                block, self._palette_f, self._palette_sq
+            )
+        return np.where(covered, self._ink_index, ground.reshape(height, width)).astype(
+            np.uint8
+        )
 
     def _poster(self, frame):
         """ImageMagick's `-ordered-dither`: each channel rounded on its own.
