@@ -119,11 +119,19 @@ _ORDERED = [
     "halftone-square-poster",
     "halftone-mask",
     "halftone-square-mask",
+    "halftone-diamond",
+    "halftone-diamond-ordered",
+    "halftone-diamond-poster",
+    "halftone-diamond-mask",
+    "halftone-brick",
+    "halftone-brick-ordered",
+    "halftone-brick-poster",
+    "halftone-brick-mask",
 ]
 
-# The halftone screens, as (triangular lattice?, colors allowed per cell, kind).
-# Four families share one dot geometry and differ only in how a covered pixel
-# gets its color:
+# The halftone screens, as (lattice, colors allowed per cell, kind). The lattice
+# is where the dots sit — see `_ordered_matrix` — and four families share each
+# one, differing only in how a covered pixel gets its color:
 #
 # - "plan" with a 2-color limit is a true halftone *screen*: a cell alternates
 #   between two palette entries, which is what makes it read as printed ink.
@@ -138,14 +146,22 @@ _ORDERED = [
 #   colors; this one paints every covered pixel the same ink and leaves the rest
 #   of the frame alone. The screen carries the shading, the ground keeps the hue.
 _HALFTONE_SCREENS = {
-    "halftone": (True, 2, "plan"),
-    "halftone-square": (False, 2, "plan"),
-    "halftone-ordered": (True, None, "plan"),
-    "halftone-square-ordered": (False, None, "plan"),
-    "halftone-poster": (True, None, "poster"),
-    "halftone-square-poster": (False, None, "poster"),
-    "halftone-mask": (True, None, "mask"),
-    "halftone-square-mask": (False, None, "mask"),
+    "halftone": ("hex", 2, "plan"),
+    "halftone-square": ("square", 2, "plan"),
+    "halftone-diamond": ("diamond", 2, "plan"),
+    "halftone-ordered": ("hex", None, "plan"),
+    "halftone-square-ordered": ("square", None, "plan"),
+    "halftone-diamond-ordered": ("diamond", None, "plan"),
+    "halftone-poster": ("hex", None, "poster"),
+    "halftone-square-poster": ("square", None, "poster"),
+    "halftone-diamond-poster": ("diamond", None, "poster"),
+    "halftone-mask": ("hex", None, "mask"),
+    "halftone-square-mask": ("square", None, "mask"),
+    "halftone-diamond-mask": ("diamond", None, "mask"),
+    "halftone-brick": ("brick", 2, "plan"),
+    "halftone-brick-ordered": ("brick", None, "plan"),
+    "halftone-brick-poster": ("brick", None, "poster"),
+    "halftone-brick-mask": ("brick", None, "mask"),
 }
 
 # The dithers that quantize each channel on its own and therefore dictate their
@@ -162,7 +178,9 @@ MASK_INK_COLORS = {"black": (0, 0, 0), "white": (255, 255, 255)}
 # Cell coverage a mask screen reaches at `dither_strength = 1`. Half is where a
 # dot screen carries the most — dot and gap the same size. Past that the gaps
 # close and the picture underneath disappears, so full strength is mapped here
-# rather than to a solid fill.
+# rather than to a solid fill. The brick mask reaches the same coverage at full
+# strength and holds `coverage = strength * this` too, but by spacing the dots
+# out rather than shrinking them — see `Ditherer._screen`.
 _MASK_FULL_COVERAGE = 0.5
 
 DITHER_METHODS = ["none", *_DIFFUSION, *_ORDERED]
@@ -229,18 +247,19 @@ def _random_ordered(size=64, levels=16, seed=0x5EED):
     return matrix
 
 
-def _halftone(width, height, triangular, steps=0):
+def _halftone(width, height, offset, steps=0):
     """A halftone screen: cells ordered outward from the dot center(s).
 
     This is gifsicle's halftone matrix generator. Cells are ranked by distance to
     the nearest dot center, ties broken by angle around it, so the ordering grows
-    a round dot rather than a square block. The triangular variant adds centers at
-    the four corners, which offsets alternate rows into the classic newsprint
-    lattice instead of a square grid.
+    a round dot rather than a square block. With `offset` a second dot is added
+    at the tile's corners, so alternate rows are shifted by half a tile: on a
+    `size` x `size`*sqrt(3) tile that is gifsicle's triangular (hexagonal)
+    lattice, on a square tile it is a square lattice turned 45 degrees.
     """
     ys, xs = np.mgrid[0:height, 0:width].astype(np.float64)
     centers = [((width - 1) / 2.0, (height - 1) / 2.0)]
-    if triangular:
+    if offset:
         centers += [
             (-0.5, -0.5),
             (width - 0.5, -0.5),
@@ -295,7 +314,7 @@ def _ordered_matrix(method, halftone_size, halftone_ink, halftone_steps=0):
         return _random_ordered(), 16, 16
     if method not in _HALFTONE_SCREENS:
         raise ValueError(f"Unknown ordered dither: {method}")
-    triangular, max_colors, kind = _HALFTONE_SCREENS[method]
+    lattice, max_colors, kind = _HALFTONE_SCREENS[method]
 
     size = int(halftone_size)
     if not MIN_HALFTONE_SIZE <= size <= MAX_HALFTONE_SIZE:
@@ -311,10 +330,27 @@ def _ordered_matrix(method, halftone_size, halftone_ink, halftone_steps=0):
             f"halftone_steps must be between 0 and {MAX_HALFTONE_STEPS}, got {steps}"
         )
 
-    if triangular:
+    # `size` is the dot pitch on every lattice: the distance between a dot and
+    # its nearest neighbours.
+    if lattice == "hex":
         # gifsicle's triangular screen is `size` wide by size*sqrt(3) tall, which
         # is what lands the dots on a hexagonal lattice rather than a square one.
         matrix, nplan = _halftone(size, int(round(size * 3**0.5)), True, steps)
+    elif lattice == "diamond":
+        # The classic 45-degree newsprint screen: a square tile with a dot in the
+        # middle and one at the corners, so the rows of dots run diagonally. Its
+        # neighbours are size*sqrt(2) apart along the axes, so the tile is that
+        # wide to keep the diagonal pitch at `size`. The hex screen's rows run
+        # horizontally and read as stripes once the dots grow; this one's do not.
+        tile = int(round(size * 2**0.5))
+        matrix, nplan = _halftone(tile, tile, True, steps)
+    elif lattice == "brick":
+        # Rows `size` apart, each shifted by half a pitch against the one above,
+        # so every dot sits under the gap in the row before it: a running bond.
+        # The hex screen is the same idea with the rows packed closer
+        # (size*sqrt(3)/2); this one keeps the row spacing equal to the pitch, so
+        # the rows read as rows even when the dots are large.
+        matrix, nplan = _halftone(size, 2 * size, True, steps)
     else:
         matrix, nplan = _halftone(size, size, False, steps)
 
@@ -502,6 +538,8 @@ class Ditherer:
         self.palette = np.asarray(palette, dtype=np.uint8)
         self.method = method
         self.strength = float(strength)
+        self._lattice = _HALFTONE_SCREENS.get(method, (None,))[0]
+        self._halftone_size = int(halftone_size)
 
         self._palette_f = self.palette.astype(np.float32)
         self._palette_sq = (self._palette_f * self._palette_f).sum(1)
@@ -584,23 +622,73 @@ class Ditherer:
     def _screen(self, height, width):
         """The fixed dot lattice for a frame of this size, cached.
 
-        It depends on nothing but the frame's dimensions, so every frame of a clip
-        gets the identical screen — the lattice does not move, and a dot does not
-        change size from frame to frame. That stability is the whole point of a
-        mask screen: a screen that tracked each frame's tone would make the dot
-        rims flicker wherever the picture changed by even one level.
+        It depends on nothing but the frame's dimensions (and the ditherer's own
+        settings), so every frame of a clip gets the identical screen — the
+        lattice does not move, and a dot does not change size from frame to
+        frame. That stability is the whole point of a mask screen: a screen that
+        tracked each frame's tone would make the dot rims flicker wherever the
+        picture changed by even one level.
+
+        `dither_strength` is the coverage, `_MASK_FULL_COVERAGE` at 1.0. The
+        matrix-based lattices reach it by growing each dot inside a fixed cell.
+        The brick lattice does it the other way round: the dot is a fixed pixel
+        set sized for half coverage at a pitch of `halftone_size`, and lowering
+        the strength spreads the rows and columns out (pitch
+        `size / sqrt(strength)`, whole pixels) instead of shrinking the dots. Same coverage either way; one reads as
+        fading dots, the other as the same dots drifting apart.
         """
         if self._screen_cache is None or self._screen_cache[0] != (height, width):
-            mh, mw = self._matrix.shape
-            cell = self._matrix[
-                np.arange(height)[:, None] % mh, np.arange(width)[None, :] % mw
-            ]
             coverage = self.strength * _MASK_FULL_COVERAGE
-            self._screen_cache = (
-                (height, width),
-                coverage > (cell + 0.5) / self._nplan,
-            )
+            if self._lattice == "brick":
+                covered = self._brick_screen(height, width, coverage)
+            else:
+                mh, mw = self._matrix.shape
+                cell = self._matrix[
+                    np.arange(height)[:, None] % mh, np.arange(width)[None, :] % mw
+                ]
+                covered = coverage > (cell + 0.5) / self._nplan
+            self._screen_cache = ((height, width), covered)
         return self._screen_cache[1]
+
+    def _brick_screen(self, height, width, coverage):
+        """A running-bond lattice of one fixed dot at a coverage-set pitch."""
+        size = self._halftone_size
+        # The dot is the pixels nearest a pixel corner, ranked the way `_halftone`
+        # ranks cells (distance, then angle), as many as cover half a size x size
+        # cell. Counting pixels rather than drawing a disc of the right area is
+        # what keeps small dots honest: a 0.8-pixel disc rasterizes to 4 pixels,
+        # a 2-pixel count is 2.
+        n_dot = max(1, int(round(_MASK_FULL_COVERAGE * size * size)))
+        offsets = np.arange(-size, size)
+        py, px = np.meshgrid(offsets, offsets, indexing="ij")
+        px = px.ravel()
+        py = py.ravel()
+        cx = px + 0.5
+        cy = py + 0.5
+        order = np.lexsort(
+            (np.arctan2(cy, cx), np.round((cx * cx + cy * cy) / 0.01).astype(np.int64))
+        )[:n_dot]
+        px = px[order]
+        py = py[order]
+        # Coverage scales with 1/pitch**2, so this holds coverage ~= strength/2.
+        # The pitch is rounded to whole pixels, and the half-pitch shift of
+        # alternate rows to a whole pixel too, so the screen is exactly periodic:
+        # every dot the same shape, every gap the same width. On the exact
+        # lattice the gaps came out 2 and 3 pixels by turns and the screen read
+        # as uneven, which at a 3-pixel dot is the whole picture. The cost is
+        # that the strength moves in steps at small sizes.
+        pitch = max(
+            1, int(round(size * (_MASK_FULL_COVERAGE / max(coverage, 1e-6)) ** 0.5))
+        )
+        shift = pitch // 2
+        # One period: two rows of dots, the second shifted. Stamping modulo the
+        # tile wraps a dot that reaches past its edge onto the far side, which is
+        # where the neighbouring dot's overhang belongs anyway.
+        tile = np.zeros((2 * pitch, pitch), dtype=bool)
+        tile[py % (2 * pitch), px % pitch] = True
+        tile[(py + pitch) % (2 * pitch), (px + shift) % pitch] = True
+        th, tw = tile.shape
+        return tile[np.arange(height)[:, None] % th, np.arange(width)[None, :] % tw]
 
     def _mask(self, frame):
         """A single-color dot screen laid over the picture.

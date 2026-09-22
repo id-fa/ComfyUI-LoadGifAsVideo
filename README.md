@@ -75,10 +75,12 @@ Writes a VIDEO or an image batch out as an animated GIF. GIF holds at most 256 c
 | `quantizer` | see below | How the palette is chosen. |
 | `dither` | see below | How colors the palette does not hold are approximated. |
 | `dither_strength` | FLOAT | `0` disables the dither entirely, `1` applies it fully. In between trades banding back for less noise. |
-| `halftone_size` | INT | Width of one halftone cell in pixels, 2–64 (`halftone` / `halftone-square` only). Bigger dots, less detail, smaller file. |
+| `halftone_size` | INT | Dot pitch of the halftone screen in pixels, 2–64 (`halftone-*` only). Bigger dots, less detail, smaller file. |
 | `halftone_steps` | INT | How many tonal steps one halftone cell resolves, 0–255. `0` gives one per cell. Lower it to keep the dot size but coarsen the tone. |
 | `halftone_ink` | `black` / `white` | Which end of the tonal range the dot grows from (halftone dithers only). |
 | `loop_count` | INT | How many extra times the GIF replays. `0` loops forever. |
+| `frame_diff` | BOOLEAN | Write only the pixels that changed since the previous frame and mark the rest transparent, so the viewer keeps what is already there. Costs one palette entry. Off by default. See *Frame differencing* below. |
+| `pillow_optimize` | BOOLEAN | Pass `optimize=True` to Pillow's GIF writer, which trims each frame's colour table to the colours it uses. It rebuilds the palette per frame, so a `global` palette stops being shared and the file may grow. Off by default. |
 
 | Output | Type | Description |
 | --- | --- | --- |
@@ -109,28 +111,31 @@ The two diversity choosers also pick *differently* when dithering is on: they le
 | `atkinson` | Error diffusion | Propagates only 6/8 of the error on purpose. Crisp, high-contrast, classic Mac look; crushes deep shadows and blown highlights. |
 | `bayer-2x2`, `bayer-4x4`, `bayer-8x8` | Ordered | Fixed threshold matrices, coarse to fine cross-hatch. |
 | `random-64x64` | Ordered | A 64×64 matrix with no repeating figure, in the spirit of gifsicle's `ro64`. Even grain without the Bayer weave. |
-| `halftone`, `halftone-square` | Ordered | Newsprint **screens**: a triangular and a square dot lattice, sized by `halftone_size` and polarised by `halftone_ink`. Each cell is limited to two palette colors — ink and ground — which is what makes them read as printed halftone. |
-| `halftone-ordered`, `halftone-square-ordered` | Ordered | The same dot geometry with the two-color limit lifted, so a cell may use as many palette entries as it needs. An ordinary ordered dither on a halftone lattice: the dots stay visible but carry tone rather than just coverage, giving smoother gradients and softer edges than the screens above, at a slightly larger file. |
-| `halftone-mask`, `halftone-square-mask` | Ordered | A **single-colour** dot screen laid over the picture. The dot is exactly the `halftone_ink` colour — real black or real white — and everything it does not cover keeps the frame's own quantized colour. The lattice is **identical in every frame**, so it never crawls. See [Mask screens](#mask-screens). |
-| `halftone-poster`, `halftone-square-poster` | Ordered | ImageMagick's `-ordered-dither`. **These do not search the palette at all** — each channel is rounded on its own against the screen, so the picture collapses onto an even RGB grid and the dots are left carrying it. At 8 colors that is the corners of the RGB cube: hard primaries, heavy pattern, and by far the smallest file of anything here. See [Poster dithers](#poster-dithers). |
+| `halftone`, `halftone-square`, `halftone-diamond`, `halftone-brick` | Ordered | Newsprint **screens**: a triangular, a square, a 45°-turned square and a running-bond dot lattice, sized by `halftone_size` and polarised by `halftone_ink`. Each cell is limited to two palette colors — ink and ground — which is what makes them read as printed halftone. |
+| `halftone-ordered`, `halftone-square-ordered`, `halftone-diamond-ordered`, `halftone-brick-ordered` | Ordered | The same dot geometry with the two-color limit lifted, so a cell may use as many palette entries as it needs. An ordinary ordered dither on a halftone lattice: the dots stay visible but carry tone rather than just coverage, giving smoother gradients and softer edges than the screens above, at a slightly larger file. |
+| `halftone-mask`, `halftone-square-mask`, `halftone-diamond-mask`, `halftone-brick-mask` | Ordered | A **single-colour** dot screen laid over the picture. The dot is exactly the `halftone_ink` colour — real black or real white — and everything it does not cover keeps the frame's own quantized colour. The lattice is **identical in every frame**, so it never crawls. See [Mask screens](#mask-screens). |
+| `halftone-poster`, `halftone-square-poster`, `halftone-diamond-poster`, `halftone-brick-poster` | Ordered | ImageMagick's `-ordered-dither`. **These do not search the palette at all** — each channel is rounded on its own against the screen, so the picture collapses onto an even RGB grid and the dots are left carrying it. At 8 colors that is the corners of the RGB cube: hard primaries, heavy pattern, and by far the smallest file of anything here. See [Poster dithers](#poster-dithers). |
+
+The four lattices differ only in where the dots sit. `halftone` is gifsicle's hexagonal screen, with its rows of dots running horizontally and packed close (`size`×√3/2 apart); `-square` is an upright grid; `-diamond` is the same grid turned 45°, the classic newsprint mesh; `-brick` is a running bond — horizontal rows a full pitch apart, each shifted half a pitch against the one above so every dot sits under the gap in the row before it. Once the dots grow large — a mask screen at full strength, or the shadows of any screen — the hexagonal rows nearly touch and read as horizontal stripes, and the square grid as rows and columns. The diamond lattice's rows run diagonally, so it stays a mesh at every size; the brick lattice keeps its rows visibly staggered.
 
 #### Mask screens
 
 Every other halftone here decides a covered pixel's colour *from that pixel*, so a single dot ends up holding several colours — the pixels under one dot are not all the same colour in the source, and on the poster dithers the R/G/B dots come out slightly different sizes and leave a fringe around the rim.
 
-`halftone-mask` and `halftone-square-mask` paint every covered pixel the **same** ink instead. A dot is one flat colour, and the frame outside the dots is left as its plain nearest palette colour:
+`halftone-mask`, `halftone-square-mask` and `halftone-diamond-mask` paint every covered pixel the **same** ink instead. A dot is one flat colour, and the frame outside the dots is left as its plain nearest palette colour:
 
 - `halftone_ink` names the actual ink — `black` is `#000000`, `white` is `#ffffff`. That colour is guaranteed to be in the palette, which costs one entry, so `colors` = 32 gives 31 adaptive colours plus the ink.
 - **The screen is fixed.** Same lattice, same dot size, in every frame — it depends on nothing but the frame's dimensions. A screen that tracked each frame's tone would make the dot rims flicker wherever the picture changed by even one level; measured on a 12-frame clip, a tone-following screen moved 12246 dot pixels, this one moves zero.
 - Tone is carried entirely by the ground showing through the gaps, not by the dot size.
-- `dither_strength` sets how much of each cell the dot covers, reaching half at `1.0` — half is where a dot screen carries the most, with dot and gap the same size, and past it the gaps close and the picture disappears. `0.5` covers a quarter, `0` removes the screen.
-- `halftone_size` sets the cell width, so it is the dot pitch. `halftone_steps` has nothing to quantize here and is ignored.
+- `dither_strength` sets how much of the frame the dots cover, reaching half at `1.0` — half is where a dot screen carries the most, with dot and gap the same size, and past it the gaps close and the picture disappears. `0.5` covers a quarter, `0` removes the screen. For `halftone-mask`, `halftone-square-mask` and `halftone-diamond-mask` that is done by shrinking the dot inside a fixed cell. **`halftone-brick-mask` does it the other way round: the dot keeps its size and the dots move apart.** The pitch grows as `halftone_size`/√`dither_strength`, rounded to whole pixels so the screen stays perfectly even, so `0.5` spaces them 1.4× further and `0.25` twice as far, with every dot the same disc it was at full strength. At small sizes the rounding means the strength moves in steps.
+- `halftone_size` sets the dot pitch — for the brick mask, the pitch at full strength, which also fixes the dot's size (a disc covering half of a `size`×`size` cell). `halftone_steps` has nothing to quantize here and is ignored.
+- At full strength the dots cover half of every cell, which is where a screen's rows start to touch: `halftone-mask` then reads as horizontal stripes and `halftone-square-mask` as a grid. `halftone-diamond-mask` is the one to pick for a mesh, since its rows run diagonally; `halftone-brick-mask` for staggered rows of separate, equal dots, with `dither_strength` setting the gap between them.
 
 Unlike the poster dithers, these keep the picture's own colours in the ground — the screen masks the image rather than replacing it.
 
 #### Poster dithers
 
-`halftone-poster` and `halftone-square-poster` work differently from every other dither in this node, and it is worth knowing how.
+`halftone-poster`, `halftone-square-poster` and `halftone-diamond-poster` work differently from every other dither in this node, and it is worth knowing how.
 
 Everything else picks an adaptive palette that describes the source, then finds the nearest entry for each pixel. These two round **each channel independently** against the halftone screen, exactly as ImageMagick's `-ordered-dither h6x6a` does. The only colors that can come out are the points of an even RGB grid, so:
 
@@ -225,13 +230,13 @@ The source rate comes from the VIDEO when one is connected, and from `source_fps
 
 **Frame delays.** GIF stores delays in hundredths of a second, so most frame rates do not land on the grid. Each delay is taken as the difference between consecutive rounded playback times rather than as one rounded delay repeated — 12fps comes out as 8, 9, 8, 8, 9… centiseconds, so the animation ends on the same wall clock as the source instead of seconds early. A delay under 2cs is re-timed to 10cs by every browser, so the output is capped at 50fps, which is the real ceiling of the format.
 
-**The halftone screen.** `halftone_size` is the width of one cell in pixels — the dot pitch. `halftone` builds a triangular (hexagonal) lattice `size` wide by `size`×√3 tall, `halftone-square` a square one. Coarser dots carry less of the image and compress much better, which makes this the knob for trading detail against file size. On a 192×192 six-frame clip at 64 colors:
+**The halftone screen.** `halftone_size` is the dot pitch in pixels — the distance between neighbouring dots. `halftone` builds a triangular (hexagonal) lattice on a `size` × `size`×√3 tile, `halftone-square` an upright square one on a `size` × `size` tile, `halftone-diamond` a square lattice turned 45° on a `size`×√2 square tile, so the diagonal pitch is again `size`, and `halftone-brick` a running bond on a `size` × 2`size` tile — rows `size` apart, alternate rows shifted by half. Coarser dots carry less of the image and compress much better, which makes this the knob for trading detail against file size. On a 192×192 six-frame clip at 64 colors:
 
 | | `floyd-steinberg` | `halftone` 6 | 10 | 16 | 24 | 40 |
 | --- | --- | --- | --- | --- | --- | --- |
 | file size | 63.5 KB | 32.6 KB | 31.4 KB | 28.9 KB | 26.4 KB | 23.9 KB |
 
-Past 255 cells (`size` 13 for the triangular screen, 16 for the square one) the screen stops growing its tonal ladder and starts sharing rungs between cells, so a very coarse dot costs no more to compute than a medium one — and loses tone, which is the point.
+Past 255 cells (`size` 13 for the triangular screen, 16 for the square one, 11 for the diamond, 12 for the brick) the screen stops growing its tonal ladder and starts sharing rungs between cells, so a very coarse dot costs no more to compute than a medium one — and loses tone, which is the point.
 
 **Dot size vs. tone.** A halftone cell normally resolves one tonal step per pixel of its area, so `halftone_size` sets the dot size and the tone together — that coupling is why the poster dithers get *bigger* as the cell grows. `halftone_steps` breaks it: it caps how many steps a cell resolves, whatever its size. Big dots with coarse tone is the smallest a halftone gets, and it is the setting to reach for when a coarser screen did not shrink the file the way you expected:
 
@@ -243,6 +248,17 @@ Past 255 cells (`size` 13 for the triangular screen, 16 for the square one) the 
 `0` and anything at or above the cell count both mean "one step per cell", so the default changes nothing. It works on every halftone dither, though the effect is much larger on the poster pair (up to 1.6x) than on the palette-searching screens (~1.1x) — and on those, 2 steps is not always smaller than 4, since a two-entry plan just alternates.
 
 `halftone_ink` chooses which end of the tonal range the dot grows from. `black` grows the darker color out of the cell center, the way ink sits on paper: small dark dots in the light areas. `white` grows the lighter color instead, for light dots out of a dark ground. It moves the dots without changing the average tone, so the image does not get lighter or darker either way — only the texture inverts.
+
+**Frame differencing.** Off, every frame is written in full, cropped to the rectangle that changed since the previous frame — Pillow does that on its own, and folds a frame identical to the previous one into its delay. `frame_diff` goes further: inside that rectangle every pixel whose colour did not change is written as transparent, and the frame is flagged "leave in place", so the viewer keeps the previous pixel there. It costs one palette entry, taken out of `colors` rather than added to it — `64` becomes 63 adaptive colours plus the transparent slot, so the colour table stays at 64 entries. It pays off when much of the frame holds still while the changes are scattered: several moving things, or a stable dither over a static background. Two small blocks moving at opposite corners of a 160×160 frame, 64 colours:
+
+| | `halftone-square` | `bayer-4x4` | `halftone-brick-mask` | `none` | `floyd-steinberg` |
+| --- | --- | --- | --- | --- | --- |
+| off | 40.6 KB | 47.1 KB | 34.0 KB | 17.0 KB | 70.1 KB |
+| `frame_diff` | **11.0 KB** | **12.2 KB** | **9.8 KB** | **6.0 KB** | 64.6 KB |
+
+It does nothing for a single moving object, where the rectangle was already tight. Error diffusion gains little because nearly every pixel changes every frame, and `per_frame` gains little because each new palette re-colours the static parts as well. The `images` output is unaffected: it is always the full composited frames, and the written file decodes back to exactly it.
+
+`pillow_optimize` hands the same job to Pillow's own `optimize=True`, which also trims each frame's colour table to the colours that frame uses. That rebuilds the palette per frame, so under `global` the frames stop sharing one table and the file can grow rather than shrink. Both toggles are off by default; the size in `info` says whether either helped.
 
 **Global vs. per-frame palettes.** `global` builds one palette from every frame and writes it once as the GIF's global color table — no color flicker between frames, and no per-frame table to pay for (768 bytes each on a 256-color GIF). `per_frame` gives each frame its own palette, which is more accurate on animations whose content changes a lot, at the cost of a larger file and some flicker in flat areas.
 
@@ -361,10 +377,12 @@ VIDEO または画像バッチをアニメーション GIF として書き出し
 | `quantizer` | 下表参照 | パレットの選び方。 |
 | `dither` | 下表参照 | パレットに無い色の近似方法。 |
 | `dither_strength` | FLOAT | `0` でディザ無効、`1` で完全に適用。中間ではバンディングとノイズのトレードオフになります。 |
-| `halftone_size` | INT | 網点セル 1 個の幅（ピクセル）、2〜64。`halftone` / `halftone-square` のときのみ有効。大きいほど網点が粗くなり、情報量が減ってファイルが小さくなります。 |
+| `halftone_size` | INT | 網点のピッチ（隣り合う網点の間隔、ピクセル）、2〜64。`halftone-*` のときのみ有効。大きいほど網点が粗くなり、情報量が減ってファイルが小さくなります。 |
 | `halftone_steps` | INT | 網点セル 1 個が表現する階調段数、0〜255。`0` でセルの面積ぶんの段数。下げると網点の大きさはそのままに階調だけを粗くできます。 |
 | `halftone_ink` | `black` / `white` | 網点が階調のどちら側から成長するか。網点系ディザのときのみ有効。 |
 | `loop_count` | INT | GIF を追加で何回再生するか。`0` で無限ループ。 |
+| `frame_diff` | BOOLEAN | 前フレームから変化したピクセルだけを書き、残りは透過にしてビューアに前の絵を残させます。パレットを 1 エントリ消費します。デフォルトはオフ。下の「フレーム差分」を参照。 |
+| `pillow_optimize` | BOOLEAN | Pillow の GIF ライタに `optimize=True` を渡します。各フレームのカラーテーブルをそのフレームが使う色だけに詰めますが、パレットをフレームごとに組み直すため `global` パレットが共有されなくなり、ファイルが大きくなることもあります。デフォルトはオフ。 |
 
 | 出力 | 型 | 説明 |
 | --- | --- | --- |
@@ -395,28 +413,31 @@ diversity 系の 2 つは、ディザを掛けるかどうかで選ぶ色その�
 | `atkinson` | 誤差拡散 | 誤差の 6/8 だけを意図的に伝播します。輪郭が立つ高コントラストな古典 Mac 調。暗部と明部は潰れます。 |
 | `bayer-2x2`, `bayer-4x4`, `bayer-8x8` | 順序ディザ | 固定の閾値行列。粗い格子から細かい格子まで。 |
 | `random-64x64` | 順序ディザ | 繰り返し模様を持たない 64×64 行列。gifsicle の `ro64` に相当する位置づけで、Bayer 特有の織り目なしに均一な粒状感が得られます。 |
-| `halftone`, `halftone-square` | 順序ディザ | 網点スクリーン。三角格子と正方格子の 2 種類で、大きさは `halftone_size`、極性は `halftone_ink` で決まります。各セルをパレット 2 色（インクと地）に制限しており、これが印刷の網点らしく見える理由です。 |
-| `halftone-ordered`, `halftone-square-ordered` | 順序ディザ | 同じ網点配置のまま 2 色制限を外したもの。1 セルが必要なだけパレット色を使えます。ハーフトーン格子の上で動く普通の順序ディザで、網点の形は残しつつ、点が被覆率だけでなく濃淡も持ちます。上の 2 つよりグラデーションが滑らかでエッジも柔らかい代わり、ファイルは少し大きくなります。 |
-| `halftone-mask`, `halftone-square-mask` | 順序ディザ | 元絵の上に重ねる単色の網点。ドットは `halftone_ink` で指定した色そのもの（純黒または純白）で塗られ、ドットが覆わない部分は元フレームの色がそのまま残ります。格子は全フレームで完全に同一なので、模様が這い回りません。[マスクスクリーン](#マスクスクリーン)を参照。 |
-| `halftone-poster`, `halftone-square-poster` | 順序ディザ | ImageMagick の `-ordered-dither`。パレット探索を一切行いません — 各チャンネルを網点スクリーンに対して独立に丸めるため、絵は均等な RGB グリッドに潰れ、網点だけが画を担うことになります。8 色なら RGB キューブの 8 頂点そのもので、原色が強く出てパターンも濃く、ファイルは本ノード中で群を抜いて小さくなります。[ポスタライズ系ディザ](#ポスタライズ系ディザ)を参照。 |
+| `halftone`, `halftone-square`, `halftone-diamond`, `halftone-brick` | 順序ディザ | 網点スクリーン。三角格子・正方格子・45° 回転した正方格子（斜め格子）・レンガ積み（1 行ごとに半ピッチずらした横並び）の 4 種類で、大きさは `halftone_size`、極性は `halftone_ink` で決まります。各セルをパレット 2 色（インクと地）に制限しており、これが印刷の網点らしく見える理由です。 |
+| `halftone-ordered`, `halftone-square-ordered`, `halftone-diamond-ordered`, `halftone-brick-ordered` | 順序ディザ | 同じ網点配置のまま 2 色制限を外したもの。1 セルが必要なだけパレット色を使えます。ハーフトーン格子の上で動く普通の順序ディザで、網点の形は残しつつ、点が被覆率だけでなく濃淡も持ちます。上の 4 つよりグラデーションが滑らかでエッジも柔らかい代わり、ファイルは少し大きくなります。 |
+| `halftone-mask`, `halftone-square-mask`, `halftone-diamond-mask`, `halftone-brick-mask` | 順序ディザ | 元絵の上に重ねる単色の網点。ドットは `halftone_ink` で指定した色そのもの（純黒または純白）で塗られ、ドットが覆わない部分は元フレームの色がそのまま残ります。格子は全フレームで完全に同一なので、模様が這い回りません。[マスクスクリーン](#マスクスクリーン)を参照。 |
+| `halftone-poster`, `halftone-square-poster`, `halftone-diamond-poster`, `halftone-brick-poster` | 順序ディザ | ImageMagick の `-ordered-dither`。パレット探索を一切行いません — 各チャンネルを網点スクリーンに対して独立に丸めるため、絵は均等な RGB グリッドに潰れ、網点だけが画を担うことになります。8 色なら RGB キューブの 8 頂点そのもので、原色が強く出てパターンも濃く、ファイルは本ノード中で群を抜いて小さくなります。[ポスタライズ系ディザ](#ポスタライズ系ディザ)を参照。 |
+
+4 種類の格子の違いは網点の並び方だけです。`halftone` は gifsicle の六方格子で、網点の列が水平に、しかも詰めて（行間 `size`×√3/2）並びます。`-square` は縦横に揃った正方格子、`-diamond` はそれを 45° 回転した、印刷でおなじみの斜め格子です。`-brick` はレンガ積みで、行間をピッチと同じ `size` にとった横一列を、1 行ごとに半ピッチずらして 1 つ上の行の隙間の真下に網点が来るようにしたものです。網点が大きくなると（マスクスクリーンの強度最大時や、どのスクリーンでも暗部）、六方格子は同じ列の網点同士がほぼ接して横縞に、正方格子は縦横の線に見えてきます。斜め格子は列が斜めに走るので、どの大きさでも網目のままです。レンガ積みは行の互い違いがそのまま見えます。
 
 #### マスクスクリーン
 
 他の網点はすべて、覆われたピクセルの色をそのピクセル自身から決めます。そのため 1 つのドットが複数の色を持つことになります（1 つのドットの下にあるピクセルは、元画像では同じ色ではないため）。ポスタライズ系では R/G/B のドットサイズがわずかにずれ、ドットの縁に色の輪郭が出ます。
 
-`halftone-mask` と `halftone-square-mask` は、覆われたピクセルをすべて同じインクで塗ります。ドットは 1 色のベタになり、ドットの外側は元フレームの最近傍パレット色のまま残ります。
+`halftone-mask`、`halftone-square-mask`、`halftone-diamond-mask` は、覆われたピクセルをすべて同じインクで塗ります。ドットは 1 色のベタになり、ドットの外側は元フレームの最近傍パレット色のまま残ります。
 
 - `halftone_ink` がインクの色そのものを指定します。`black` は `#000000`、`white` は `#ffffff` です。この色は必ずパレットに入るため 1 エントリを消費し、`colors` = 32 なら適応パレット 31 色 + インクになります。
 - 網点は固定です。格子の位置もドットの大きさも全フレームで同一で、フレームのサイズ以外には一切依存しません。フレームごとの明暗に追従する網点にすると、絵が 1 階調変わっただけでドットの縁が切り替わってちらつきます。12 フレームのクリップでの実測では、明暗追従型は 12246 ピクセルのドットが変化したのに対し、この方式は 0 です。
 - 階調は、網点の隙間から見える地が担います。ドットの大きさは階調を表しません。
-- `dither_strength` はセルのどれだけをドットが覆うかを決め、`1.0` で半分になります。ドットと隙間が同じ大きさになる被覆率 50% が網点として最も情報を運べる状態で、それを超えると隙間が閉じて下の絵が見えなくなるためです。`0.5` で 25%、`0` で網点なしです。
-- `halftone_size` はセル幅、つまり網点のピッチを決めます。`halftone_steps` はここでは量子化する対象がないため無視されます。
+- `dither_strength` はフレームのどれだけをドットが覆うかを決め、`1.0` で半分になります。ドットと隙間が同じ大きさになる被覆率 50% が網点として最も情報を運べる状態で、それを超えると隙間が閉じて下の絵が見えなくなるためです。`0.5` で 25%、`0` で網点なしです。`halftone-mask`、`halftone-square-mask`、`halftone-diamond-mask` は固定のセルの中でドットを縮めてこれを実現します。**`halftone-brick-mask` だけは逆で、ドットの大きさはそのままに間隔が広がります。** ピッチは `halftone_size`/√`dither_strength` を整数ピクセルに丸めたもので（模様が完全に均一になるようにするため）、`0.5` で 1.4 倍、`0.25` で 2 倍に広がり、ドットは強度最大のときと同じ円のままです。サイズが小さいと丸めのせいで強度が段階的にしか効きません。
+- `halftone_size` は網点のピッチを決めます。レンガ積みマスクでは強度最大時のピッチで、ドットの大きさもここから決まります（`size`×`size` のセルの半分を覆う円）。`halftone_steps` はここでは量子化する対象がないため無視されます。
+- 強度最大では網点が各セルの半分を覆い、ちょうど網点の列同士が接し始める大きさです。このとき `halftone-mask` は横縞に、`halftone-square-mask` は格子線に見えます。網目状にしたいときは列が斜めに走る `halftone-diamond-mask`、同じ大きさのドットを互い違いの行に並べて隙間を `dither_strength` で開けたいときは `halftone-brick-mask` を選んでください。
 
 ポスタライズ系と違い、地には元絵の色が残ります。画像を置き換えるのではなく、網でマスクする方式です。
 
 #### ポスタライズ系ディザ
 
-`halftone-poster` と `halftone-square-poster` だけは、他のディザとまったく別の仕組みで動きます。
+`halftone-poster`、`halftone-square-poster`、`halftone-diamond-poster` だけは、他のディザとまったく別の仕組みで動きます。
 
 他はすべて「元絵を表すパレットを適応的に作り、各ピクセルを最も近いエントリに写す」方式です。この 2 つは ImageMagick の `-ordered-dither h6x6a` と同じく、各チャンネルを網点スクリーンに対して独立に丸めます。出力しうる色は均等な RGB グリッドの格子点だけになるため:
 
@@ -511,13 +532,13 @@ ComfyUI_00042_.gif
 
 **フレームディレイ。** GIF はディレイを 1/100 秒単位で保持するため、多くのフレームレートは格子上に乗りません。本ノードは「丸めた 1 フレーム分のディレイを繰り返す」のではなく、累積再生時刻を丸めた差分を各フレームのディレイにします。12fps なら 8, 9, 8, 8, 9… センチ秒となり、全体の長さが元と一致します（丸め誤差が累積して数秒早く終わることがありません）。2cs 未満のディレイはどのブラウザでも 10cs に読み替えられてしまうため、出力は 50fps で頭打ちになります。これは GIF という形式の実際の上限です。
 
-**網点スクリーン。** `halftone_size` はセル 1 個の幅（ピクセル）、つまり網点のピッチです。`halftone` は幅 `size` × 高さ `size`×√3 の三角（六方）格子、`halftone-square` は正方格子を作ります。網点を粗くすると画像の情報量が減り圧縮がよく効くため、これがディテールとファイルサイズを引き換えにするつまみになります。192×192・6 フレーム・64 色での実測:
+**網点スクリーン。** `halftone_size` は網点のピッチ（隣り合う網点の間隔、ピクセル）です。`halftone` は幅 `size` × 高さ `size`×√3 のタイルに三角（六方）格子、`halftone-square` は `size` × `size` のタイルに縦横に揃った正方格子、`halftone-diamond` は一辺 `size`×√2 のタイルに 45° 回転した正方格子を作ります（斜め方向のピッチがちょうど `size` になります）。`halftone-brick` は `size` × 2`size` のタイルにレンガ積み（行間 `size`、1 行おきに半ピッチずらし）を作ります。網点を粗くすると画像の情報量が減り圧縮がよく効くため、これがディテールとファイルサイズを引き換えにするつまみになります。192×192・6 フレーム・64 色での実測:
 
 | | `floyd-steinberg` | `halftone` 6 | 10 | 16 | 24 | 40 |
 | --- | --- | --- | --- | --- | --- | --- |
 | ファイルサイズ | 63.5 KB | 32.6 KB | 31.4 KB | 28.9 KB | 26.4 KB | 23.9 KB |
 
-セル数が 255 を超えると（三角格子なら `size` 13 以上、正方格子なら 16 以上）、スクリーンは階調の段数を増やすのをやめてセル同士で段を共有し始めます。そのため非常に粗い網点でも計算量は中くらいのものと変わらず、その代わり階調が落ちます。それこそが狙いです。
+セル数が 255 を超えると（三角格子なら `size` 13 以上、正方格子なら 16 以上、斜め格子なら 11 以上、レンガ積みなら 12 以上）、スクリーンは階調の段数を増やすのをやめてセル同士で段を共有し始めます。そのため非常に粗い網点でも計算量は中くらいのものと変わらず、その代わり階調が落ちます。それこそが狙いです。
 
 **網点の大きさと階調の分離。** 網点セルは通常、面積のピクセル数だけ階調段数を持ちます。つまり `halftone_size` は網点の大きさと階調の細かさを同時に決めており、ポスタライズ系でセルを大きくするとかえってファイルが増えるのはこの結び付きが原因です。`halftone_steps` はこれを切り離し、セルの大きさに関わらず段数の上限を決めます。大きな網点 × 粗い階調が網点ディザで最も小さくなる組み合わせで、「網点を粗くしたのに小さくならなかった」ときに使うつまみです:
 
@@ -529,6 +550,17 @@ ComfyUI_00042_.gif
 `0` と、セル数以上の値はどちらも「セルの面積ぶんの段数」を意味するので、既定値では何も変わりません。すべての網点系ディザに効きますが、効果はポスタライズ系（最大 1.6 倍）の方がパレット探索型（約 1.1 倍）より遥かに大きく、後者では段数 2 が段数 4 より小さくなるとは限りません（2 エントリの plan は単に交互に並ぶだけになるため）。
 
 `halftone_ink` は網点が階調のどちら側から成長するかを決めます。`black` はセル中心から暗い色が成長し、紙にインクが乗るのと同じく明るい領域に小さな黒点が並びます。`white` は逆に明るい色が成長し、暗い地に小さな白点が浮きます。網点の位置が入れ替わるだけで平均階調は変わらないため、どちらを選んでも画像が明るくなったり暗くなったりはせず、テクスチャだけが反転します。
+
+**フレーム差分。** オフのときも各フレームは前フレームから変化した矩形にクロップして書かれます（Pillow が自動で行い、前フレームと同一のフレームはディレイに合算されます）。`frame_diff` はさらに踏み込み、その矩形の中でも色が変わっていないピクセルを透過にし、フレームに「そのまま残す」を指定して、ビューアに前のピクセルを残させます。パレットを 1 エントリ消費しますが、`colors` に足すのではなく `colors` から引きます。`64` なら適応パレット 63 色 + 透過スロットで、カラーテーブルは 64 エントリのままです。効くのは、画面の大部分が静止していて変化が散らばっているときです。動くものが複数ある、静止した背景に安定したディザが乗っている、などです。160×160・64 色で、対角の隅に小さなブロックが 2 つ動くクリップの実測:
+
+| | `halftone-square` | `bayer-4x4` | `halftone-brick-mask` | `none` | `floyd-steinberg` |
+| --- | --- | --- | --- | --- | --- |
+| オフ | 40.6 KB | 47.1 KB | 34.0 KB | 17.0 KB | 70.1 KB |
+| `frame_diff` | **11.0 KB** | **12.2 KB** | **9.8 KB** | **6.0 KB** | 64.6 KB |
+
+動くものが 1 つだけなら矩形クロップで既に十分なので効果はありません。誤差拡散はほぼ全ピクセルが毎フレーム変わるため効果が小さく、`per_frame` はパレットが変わるたびに静止部分の色も変わるためやはり効果が小さくなります。`images` 出力には影響しません。常に合成済みの完全なフレームで、書き出したファイルを読み戻すとそれと厳密に一致します。
+
+`pillow_optimize` は同じ仕事を Pillow の `optimize=True` に任せるもので、加えて各フレームのカラーテーブルをそのフレームが使う色だけに詰めます。パレットをフレームごとに組み直すため、`global` でもフレーム間でテーブルが共有されなくなり、縮むどころか増えることもあります。どちらのトグルもデフォルトはオフです。効いたかどうかは `info` のサイズで確認してください。
 
 **global と per_frame パレット。** `global` は全フレームから 1 つのパレットを作り、GIF のグローバルカラーテーブルとして 1 回だけ書きます。フレーム間の色ちらつきが無く、フレームごとのローカルカラーテーブル（256 色なら 1 枚あたり 768 バイト）も不要です。`per_frame` はフレームごとにパレットを作るため、内容が大きく変わるアニメーションでは正確ですが、ファイルは大きくなり、平坦な部分でちらつきが出ます。
 

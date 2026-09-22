@@ -188,14 +188,17 @@ def _with_ink(palette, ink):
     return np.vstack([palette, target]).astype(np.uint8)
 
 
-def _with_transparency(palette):
+def _with_transparency(palette, spare=None):
     """`palette` with a transparent entry prepended at index 0.
 
     Index 0 rather than appended, so the transparent index is the same number
     whatever each frame's palette turned out to be — `per_frame` palettes vary in
-    length, and a GIF carries one transparent index for the whole file.
+    length, and a GIF carries one transparent index for the whole file. `spare`
+    is the color to put there when the caller has one that every frame can share.
     """
-    return np.vstack([_spare_color(palette), palette]).astype(np.uint8)
+    if spare is None:
+        spare = _spare_color(palette)
+    return np.vstack([spare, palette]).astype(np.uint8)
 
 
 def _to_uint8(images, size=None, resample=None):
@@ -336,7 +339,7 @@ class SaveAsGif:
                     DITHER_METHODS,
                     {
                         "default": "floyd-steinberg",
-                        "tooltip": "How colors the palette does not hold are approximated. Error diffusion looks cleanest on photographic frames; the ordered and halftone screens are stable frame to frame, so they do not crawl on animation. halftone/halftone-square cap a cell at two colors for a printed-ink look; their -ordered variants lift that cap for smoother tone. The -mask pair lays a single flat ink dot (the halftone_ink color) over the picture and leaves the rest of the frame alone; its lattice is the same in every frame, so it never crawls. The -poster pair is ImageMagick's -ordered-dither: it ignores the palette entirely and rounds each channel to an even RGB grid, throwing away most of the tone for a much smaller file.",
+                        "tooltip": "How colors the palette does not hold are approximated. Error diffusion looks cleanest on photographic frames; the ordered and halftone screens are stable frame to frame, so they do not crawl on animation. halftone/halftone-square/halftone-diamond/halftone-brick cap a cell at two colors for a printed-ink look; their -ordered variants lift that cap for smoother tone. The -mask variants lay a single flat ink dot (the halftone_ink color) over the picture and leave the rest of the frame alone; their lattice is the same in every frame, so it never crawls. The -poster variants are ImageMagick's -ordered-dither: they ignore the palette entirely and round each channel to an even RGB grid, throwing away most of the tone for a much smaller file. Lattices: halftone puts the dots on a hexagonal grid whose rows run horizontally, -square on an upright square grid, -diamond on a square grid turned 45 degrees (the classic newsprint mesh, whose rows never line up with the scan lines), -brick in horizontal rows a full pitch apart with every other row shifted by half, so each dot sits under the gap above it.",
                     },
                 ),
                 "dither_strength": (
@@ -346,7 +349,7 @@ class SaveAsGif:
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.05,
-                        "tooltip": "How much of the quantization error is dithered away. 0 disables the dither entirely; lower values trade banding back for less noise. For the -mask dithers this is the screen's coverage instead: how much of each cell the dot fills, reaching half at 1.0.",
+                        "tooltip": "How much of the quantization error is dithered away. 0 disables the dither entirely; lower values trade banding back for less noise. For the -mask dithers this is the screen's coverage instead, reaching half at 1.0: the hex/square/diamond masks shrink the dot inside its cell, the brick mask keeps the dot's size and spreads the dots apart (pitch = halftone_size / sqrt(strength)).",
                     },
                 ),
                 "halftone_size": (
@@ -356,7 +359,7 @@ class SaveAsGif:
                         "min": MIN_HALFTONE_SIZE,
                         "max": MAX_HALFTONE_SIZE,
                         "step": 1,
-                        "tooltip": "Width of one halftone cell in pixels (any of the halftone dithers). For the palette-searching screens, larger dots carry less of the image and compress far better. For the -poster pair the cell also sets the number of threshold steps, so the file peaks around size 8 and only shrinks again past 16 — there, small cells give the smallest file and large cells the boldest dots.",
+                        "tooltip": "Distance between neighbouring halftone dots in pixels (any of the halftone dithers). For the palette-searching screens, larger dots carry less of the image and compress far better. For the -poster pair the cell also sets the number of threshold steps, so the file peaks around size 8 and only shrinks again past 16 — there, small cells give the smallest file and large cells the boldest dots.",
                     },
                 ),
                 "halftone_steps": (
@@ -384,6 +387,20 @@ class SaveAsGif:
                         "max": 1000,
                         "step": 1,
                         "tooltip": "How many extra times the GIF replays. 0 loops forever.",
+                    },
+                ),
+                "frame_diff": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Write only the pixels that changed since the previous frame; the rest are marked transparent so the viewer keeps what is already there. Costs one palette entry (255 colors instead of 256). Shrinks the file a lot when much of the frame holds still and the dither is stable (the ordered and halftone screens); error diffusion changes almost every pixel every frame, so it gains little there. Off writes every frame in full, cropped to the changed rectangle.",
+                    },
+                ),
+                "pillow_optimize": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Pass optimize=True to Pillow's GIF writer. It trims each frame's color table to the colors that frame actually uses and marks unchanged pixels transparent. Note that it rebuilds the palette per frame, so palette_scope=global no longer gives one shared table and the file may grow instead of shrink. Try it and read the size in `info`.",
                     },
                 ),
             },
@@ -437,6 +454,8 @@ class SaveAsGif:
         # Keyword with a default so a queued prompt from before the widget
         # existed still runs, and runs the way it used to.
         size_mode="pad",
+        frame_diff=False,
+        pillow_optimize=False,
     ):
         if video is not None and images is not None:
             raise ValueError(
@@ -475,7 +494,12 @@ class SaveAsGif:
         # ratio. They are written as GIF transparency, which costs one palette
         # entry — so the adaptive palette gives up a color to make room.
         letterboxed = (scaled_w, scaled_h) != (canvas_w, canvas_h)
-        palette_size = min(colors, MAX_COLORS - 1) if letterboxed else colors
+        # Frame differencing marks unchanged pixels with the same transparent
+        # entry, so either use of transparency reserves the slot.
+        transparent = letterboxed or bool(frame_diff)
+        # The slot comes out of `colors`, not on top of it: a 64-color request
+        # with a 65-entry table would be written as a 128-entry one.
+        palette_size = max(2, colors - 1) if transparent else colors
 
         # The diversity choosers pick a different palette when they know the
         # result will be dithered, so they need to be told.
@@ -487,7 +511,10 @@ class SaveAsGif:
         # have nothing to decide in that case.
         grid_palette = None
         if dither in POSTER_DITHERS:
-            grid_palette, _ = uniform_palette(palette_size)
+            # The grid keeps the full request even with a transparent slot: a
+            # cube plus one entry (217) rounds up to the same 256-entry table a
+            # cube alone does, while asking for 215 would drop it from 6^3 to 5^3.
+            grid_palette, _ = uniform_palette(min(colors, MAX_COLORS - 1))
 
         # A mask screen paints its dot in one fixed ink, so that color has to be
         # an entry; give up a slot for it rather than settle for the nearest.
@@ -515,17 +542,19 @@ class SaveAsGif:
         shared_palette = np.zeros((0, 3), dtype=np.uint8)
         if shared is not None:
             shared_palette = (
-                _with_transparency(shared.palette) if letterboxed else shared.palette
+                _with_transparency(shared.palette) if transparent else shared.palette
             )
 
-        progress = ProgressBar(count) if ProgressBar is not None else None
-        pages = []
-        colors_written = 0
-        result = np.empty((count, canvas_h, canvas_w, 3), dtype=np.uint8)
-        for i in range(count):
-            ditherer, palette = shared, shared_palette
-            if ditherer is None:
-                ditherer = Ditherer(
+        # Per-frame palettes with a transparent slot are built up front so the
+        # slot can hold one color in every frame. Pillow decides how much of a
+        # frame to write by comparing it with the previous one *as colors*, so
+        # a slot whose color changed between frames would count as a change
+        # everywhere it appears — every bar, every unchanged pixel.
+        ditherers = None
+        spare = None
+        if shared is None and transparent:
+            ditherers = [
+                Ditherer(
                     palette_for(frames[i : i + 1]),
                     dither,
                     dither_strength,
@@ -533,9 +562,40 @@ class SaveAsGif:
                     halftone_ink,
                     halftone_steps,
                 )
+                for i in range(count)
+            ]
+            try:
+                spare = _spare_color(np.vstack([d.palette for d in ditherers]))
+            except RuntimeError:
+                # Thousands of palettes can between them cover the lattice the
+                # scan walks. Each frame then picks its own; the file is still
+                # correct, only cropped less tightly.
+                spare = None
+
+        progress = ProgressBar(count) if ProgressBar is not None else None
+        delays = _frame_delays(count, float(frame_rate))
+        pages = []
+        durations = []
+        previous_page = None
+        colors_written = 0
+        result = np.empty((count, canvas_h, canvas_w, 3), dtype=np.uint8)
+        for i in range(count):
+            ditherer, palette = shared, shared_palette
+            if ditherer is None:
+                if ditherers is not None:
+                    ditherer = ditherers[i]
+                else:
+                    ditherer = Ditherer(
+                        palette_for(frames[i : i + 1]),
+                        dither,
+                        dither_strength,
+                        halftone_size,
+                        halftone_ink,
+                        halftone_steps,
+                    )
                 palette = (
-                    _with_transparency(ditherer.palette)
-                    if letterboxed
+                    _with_transparency(ditherer.palette, spare)
+                    if transparent
                     else ditherer.palette
                 )
 
@@ -543,15 +603,61 @@ class SaveAsGif:
             # over the padding would let error diffusion bleed the bar color into
             # the edge of the frame.
             indices = ditherer(frames[i])
+            if transparent:
+                # Index 0 is the transparent slot, so the dither's indices move up
+                # one. The dither's palette holds at most 255 entries here, so
+                # this cannot wrap.
+                indices = indices + 1
             if letterboxed:
                 padded = np.zeros((canvas_h, canvas_w), dtype=np.uint8)
                 padded[
                     offset_y : offset_y + scaled_h, offset_x : offset_x + scaled_w
-                ] = indices + 1
+                ] = indices
                 indices = padded
 
             result[i] = palette[indices]
+            if frame_diff and previous_page is not None:
+                # Compared as colors, not indices: under `per_frame` each frame
+                # has its own palette, so equal indices mean nothing. A pixel
+                # that kept its color is written as transparent and the viewer
+                # leaves the previous frame's pixel in place (disposal 1). A
+                # frame that changed nothing at all is folded into the previous
+                # frame's delay rather than written.
+                same = np.all(result[i] == result[i - 1], axis=-1)
+                if same.all():
+                    durations[-1] += delays[i]
+                    if progress is not None:
+                        progress.update(1)
+                    continue
+                diffed = np.where(same, 0, indices).astype(np.uint8)
+                if shared is not None:
+                    # Pillow crops each frame to where it differs from the frame
+                    # it was handed before, not from what the viewer shows.
+                    # Handing it the diffed frame outright would make that
+                    # "where either frame has a change", or the whole canvas
+                    # right after the opaque first frame. So outside the changed
+                    # pixels' bounding box the page repeats the previous page,
+                    # which Pillow then crops away; inside it, unchanged pixels
+                    # go transparent. What reaches the file is the tight box,
+                    # and the viewer's canvas is still the true frame.
+                    rows = np.flatnonzero(~same.all(axis=1))
+                    cols = np.flatnonzero(~same.all(axis=0))
+                    y0, y1, x0, x1 = rows[0], rows[-1] + 1, cols[0], cols[-1] + 1
+                    page = previous_page.copy()
+                    page[y0:y1, x0:x1] = diffed[y0:y1, x0:x1]
+                    indices = page
+                else:
+                    # Under `per_frame` that trick fails: Pillow compares frames
+                    # with different palettes as colors, so repeating the
+                    # previous page's indices reads as a change wherever the
+                    # palette moved. The plain diff is what stays comparable —
+                    # transparent against transparent, with the shared spare
+                    # color — and Pillow crops it to where this frame's changes
+                    # and the last frame's changes together reach.
+                    indices = diffed
+            previous_page = indices
             pages.append(_page(indices, palette))
+            durations.append(delays[i])
             # Reported in `info`. Under `per_frame` this ends up being the last
             # frame's count, which is the honest answer — there is no single one.
             colors_written = len(palette)
@@ -574,18 +680,24 @@ class SaveAsGif:
         options = {}
         if shared is not None:
             options["palette"] = shared_palette.reshape(-1).tobytes()
-        if letterboxed:
+        if transparent:
             options["transparency"] = 0
-        delays = _frame_delays(count, float(frame_rate))
+        if frame_diff:
+            # "Leave in place": the next frame paints over this one, which is
+            # what makes its transparent pixels mean "unchanged". The default 0
+            # is read the same way by every viewer in practice, but 1 says so.
+            options["disposal"] = 1
         pages[0].save(
             path,
             save_all=True,
             append_images=pages[1:],
-            duration=delays,
+            duration=durations,
             loop=loop_count,
             # Pillow's `optimize` rebuilds the palette to the colors a frame
-            # actually uses, which would undo a deliberately shared global one.
-            optimize=False,
+            # actually uses, which undoes a deliberately shared global one — so
+            # it is off unless asked for. When on, Pillow also does its own
+            # unchanged-pixels-to-transparent pass, which agrees with ours.
+            optimize=bool(pillow_optimize),
             **options,
         )
 
@@ -600,7 +712,9 @@ class SaveAsGif:
                 f"{written / 1024:,.1f} KB ({written:,} bytes)",
                 f"{count} frames · {canvas_w}×{canvas_h} · "
                 f"{float(frame_rate):.4g} fps · {sum(delays) / 1000.0:.2f} s",
-                f"{colors_written} colors · {dither}",
+                f"{colors_written} colors · {dither}"
+                + (f" · {len(pages)} frames written, diffed" if frame_diff else "")
+                + (" · pillow optimize" if pillow_optimize else ""),
             ]
         )
 
