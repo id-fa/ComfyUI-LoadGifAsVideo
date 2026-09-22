@@ -339,7 +339,7 @@ class SaveAsGif:
                     DITHER_METHODS,
                     {
                         "default": "floyd-steinberg",
-                        "tooltip": "How colors the palette does not hold are approximated. Error diffusion looks cleanest on photographic frames; the ordered and halftone screens are stable frame to frame, so they do not crawl on animation. halftone/halftone-square/halftone-diamond/halftone-brick cap a cell at two colors for a printed-ink look; their -ordered variants lift that cap for smoother tone. The -mask variants lay a single flat ink dot (the halftone_ink color) over the picture and leave the rest of the frame alone; their lattice is the same in every frame, so it never crawls. The -poster variants are ImageMagick's -ordered-dither: they ignore the palette entirely and round each channel to an even RGB grid, throwing away most of the tone for a much smaller file. Lattices: halftone puts the dots on a hexagonal grid whose rows run horizontally, -square on an upright square grid, -diamond on a square grid turned 45 degrees (the classic newsprint mesh, whose rows never line up with the scan lines), -brick in horizontal rows a full pitch apart with every other row shifted by half, so each dot sits under the gap above it.",
+                        "tooltip": "How colors the palette does not hold are approximated. Error diffusion looks cleanest on photographic frames; the ordered and halftone screens are stable frame to frame, so they do not crawl on animation. halftone/halftone-square/halftone-diamond/halftone-brick cap a cell at two colors for a printed-ink look; their -ordered variants lift that cap for smoother tone. The -mask variants lay a single flat ink dot (the halftone_ink color) over the picture and leave the rest of the frame alone; their lattice is the same in every frame, so it never crawls. The -mask-inverted variants swap the two regions: the picture shows through the dots and the ink fills the ground between them. The -poster variants are ImageMagick's -ordered-dither: they ignore the palette entirely and round each channel to an even RGB grid, throwing away most of the tone for a much smaller file. Lattices: halftone puts the dots on a hexagonal grid whose rows run horizontally, -square on an upright square grid, -diamond on a square grid turned 45 degrees (the classic newsprint mesh, whose rows never line up with the scan lines), -brick in horizontal rows a full pitch apart with every other row shifted by half, so each dot sits under the gap above it.",
                     },
                 ),
                 "dither_strength": (
@@ -349,7 +349,7 @@ class SaveAsGif:
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.05,
-                        "tooltip": "How much of the quantization error is dithered away. 0 disables the dither entirely; lower values trade banding back for less noise. For the -mask dithers this is the screen's coverage instead, reaching half at 1.0: the hex/square/diamond masks shrink the dot inside its cell, the brick mask keeps the dot's size and spreads the dots apart (pitch = halftone_size / sqrt(strength)).",
+                        "tooltip": "How much of the quantization error is dithered away. 0 disables the dither entirely; lower values trade banding back for less noise. For the -mask dithers this is the screen's coverage instead, reaching half at 1.0: the hex/square/diamond masks shrink the dot inside its cell, the brick mask keeps the dot's size and spreads the dots apart (pitch = halftone_size / sqrt(strength)). For the -mask-inverted dithers it is how much of the picture shows through the dots, so lowering it lets the ink take over.",
                     },
                 ),
                 "halftone_size": (
@@ -376,7 +376,7 @@ class SaveAsGif:
                     HALFTONE_INKS,
                     {
                         "default": "black",
-                        "tooltip": "Which end of the tonal range the halftone dot grows from. black: dark dots on a light ground, the way ink sits on paper. white: light dots out of a dark ground. For the -mask dithers this names the ink itself — real black or real white — and it is reserved in the palette.",
+                        "tooltip": "Which end of the tonal range the halftone dot grows from. black: dark dots on a light ground, the way ink sits on paper. white: light dots out of a dark ground. For the -mask and -mask-inverted dithers this names the ink itself — real black or real white — and it is reserved in the palette.",
                     },
                 ),
                 "loop_count": (

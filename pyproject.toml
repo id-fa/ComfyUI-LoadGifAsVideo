@@ -1,6 +1,6 @@
 [project]
 name = "load-gif-as-video"
-version = "0.1.4"
+version = "0.1.5"
 description = "Loads an animated GIF/APNG/WEBP as a VIDEO stream, loops any VIDEO with variable playback speed, and saves a VIDEO or image batch back out as an animated GIF with a full set of color quantizers and dithering filters"
 readme = "README.md"
 license = {text = "MIT license"}

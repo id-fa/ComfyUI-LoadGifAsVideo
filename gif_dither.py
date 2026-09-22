@@ -119,14 +119,18 @@ _ORDERED = [
     "halftone-square-poster",
     "halftone-mask",
     "halftone-square-mask",
+    "halftone-mask-inverted",
+    "halftone-square-mask-inverted",
     "halftone-diamond",
     "halftone-diamond-ordered",
     "halftone-diamond-poster",
     "halftone-diamond-mask",
+    "halftone-diamond-mask-inverted",
     "halftone-brick",
     "halftone-brick-ordered",
     "halftone-brick-poster",
     "halftone-brick-mask",
+    "halftone-brick-mask-inverted",
 ]
 
 # The halftone screens, as (lattice, colors allowed per cell, kind). The lattice
@@ -145,6 +149,9 @@ _ORDERED = [
 #   a covered pixel's color from that pixel, so a dot ends up holding several
 #   colors; this one paints every covered pixel the same ink and leaves the rest
 #   of the frame alone. The screen carries the shading, the ground keeps the hue.
+# - "mask-inverted" is the same screen with the two regions swapped: the picture
+#   shows *through* the dots and the ink fills the ground between them. Same
+#   lattice, same dot, pixel for pixel the complement of "mask".
 _HALFTONE_SCREENS = {
     "halftone": ("hex", 2, "plan"),
     "halftone-square": ("square", 2, "plan"),
@@ -158,11 +165,21 @@ _HALFTONE_SCREENS = {
     "halftone-mask": ("hex", None, "mask"),
     "halftone-square-mask": ("square", None, "mask"),
     "halftone-diamond-mask": ("diamond", None, "mask"),
+    "halftone-mask-inverted": ("hex", None, "mask-inverted"),
+    "halftone-square-mask-inverted": ("square", None, "mask-inverted"),
+    "halftone-diamond-mask-inverted": ("diamond", None, "mask-inverted"),
     "halftone-brick": ("brick", 2, "plan"),
     "halftone-brick-ordered": ("brick", None, "plan"),
     "halftone-brick-poster": ("brick", None, "poster"),
     "halftone-brick-mask": ("brick", None, "mask"),
+    "halftone-brick-mask-inverted": ("brick", None, "mask-inverted"),
 }
+
+# The two mask kinds: ink dots over the picture, and the picture showing through
+# dots cut out of the ink. Everything that treats a mask screen specially — the
+# reserved ink entry, the fixed screen, `halftone_ink` naming a real color —
+# applies to both; only `Ditherer._screen` tells them apart.
+_MASK_KINDS = ("mask", "mask-inverted")
 
 # The dithers that quantize each channel on its own and therefore dictate their
 # own palette: an even RGB grid, not an adaptive one. `SaveAsGif` checks this.
@@ -170,7 +187,12 @@ POSTER_DITHERS = [m for m, (_, _, k) in _HALFTONE_SCREENS.items() if k == "poste
 
 # The dithers that paint their dot in one fixed color, so `SaveAsGif` has to make
 # sure that color is actually in the palette.
-MASK_DITHERS = [m for m, (_, _, k) in _HALFTONE_SCREENS.items() if k == "mask"]
+MASK_DITHERS = [m for m, (_, _, k) in _HALFTONE_SCREENS.items() if k in _MASK_KINDS]
+
+# The mask screens whose dots are the *windows*: picture inside, ink outside.
+INVERTED_MASK_DITHERS = [
+    m for m, (_, _, k) in _HALFTONE_SCREENS.items() if k == "mask-inverted"
+]
 
 # The ink a mask screen paints with, by `halftone_ink`.
 MASK_INK_COLORS = {"black": (0, 0, 0), "white": (255, 255, 255)}
@@ -354,7 +376,7 @@ def _ordered_matrix(method, halftone_size, halftone_ink, halftone_steps=0):
     else:
         matrix, nplan = _halftone(size, size, False, steps)
 
-    if halftone_ink == "white" and kind != "mask":
+    if halftone_ink == "white" and kind not in _MASK_KINDS:
         # Plans run dark to light and the matrix runs outward from the dot center,
         # so cell 0 normally takes the darkest color: a dark dot growing on a
         # light ground, the way ink sits on paper. Reversing the matrix grows the
@@ -538,7 +560,7 @@ class Ditherer:
         self.palette = np.asarray(palette, dtype=np.uint8)
         self.method = method
         self.strength = float(strength)
-        self._lattice = _HALFTONE_SCREENS.get(method, (None,))[0]
+        self._lattice, _, self._kind = _HALFTONE_SCREENS.get(method, (None, None, None))
         self._halftone_size = int(halftone_size)
 
         self._palette_f = self.palette.astype(np.float32)
@@ -567,6 +589,7 @@ class Ditherer:
         # nearest-match rather than an exact lookup keeps a hand-built palette
         # working, at the cost of a slightly off ink.
         self.is_mask = method in MASK_DITHERS
+        self._mask_inverted = self._kind == "mask-inverted"
         self._ink_index = 0
         self._screen_cache = None
         if self.is_mask:
@@ -634,8 +657,16 @@ class Ditherer:
         The brick lattice does it the other way round: the dot is a fixed pixel
         set sized for half coverage at a pitch of `halftone_size`, and lowering
         the strength spreads the rows and columns out (pitch
-        `size / sqrt(strength)`, whole pixels) instead of shrinking the dots. Same coverage either way; one reads as
-        fading dots, the other as the same dots drifting apart.
+        `size / sqrt(strength)`, whole pixels) instead of shrinking the dots. Same
+        coverage either way; one reads as fading dots, the other as the same
+        dots drifting apart.
+
+        An inverted mask returns the complement: the dots are the windows the
+        picture shows through and the ink is the ground around them. The
+        coverage rule then applies to the *picture* — `dither_strength` sets how
+        much of the frame shows, half at 1.0 — so lowering it shrinks the
+        windows (or spreads them apart, on the brick lattice) and the ink takes
+        over. Every dot, gap and pixel is exactly where it is on the plain mask.
         """
         if self._screen_cache is None or self._screen_cache[0] != (height, width):
             coverage = self.strength * _MASK_FULL_COVERAGE
@@ -647,6 +678,8 @@ class Ditherer:
                     np.arange(height)[:, None] % mh, np.arange(width)[None, :] % mw
                 ]
                 covered = coverage > (cell + 0.5) / self._nplan
+            if self._mask_inverted:
+                covered = ~covered
             self._screen_cache = ((height, width), covered)
         return self._screen_cache[1]
 
@@ -703,6 +736,12 @@ class Ditherer:
         The screen is fixed: same lattice, same dot size, every frame. Tone is
         carried entirely by the ground, not by the dots. `dither_strength` sets
         how much of each cell the dot covers, up to half at full strength.
+
+        The inverted methods swap the two regions — `_screen` hands back the
+        complement — so the picture shows through the dots and the ink fills
+        the space between them. Nothing else changes: the ink index, the ground
+        lookup and the lattice are the same, which is what keeps the two
+        variants pixel-for-pixel complements of each other.
         """
         height, width = frame.shape[:2]
         covered = self._screen(height, width)
