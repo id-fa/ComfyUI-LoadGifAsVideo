@@ -68,6 +68,7 @@ Writes a VIDEO or an image batch out as an animated GIF. GIF holds at most 256 c
 | `fps` | FLOAT | Frame rate of the GIF. Below the source rate it **drops frames**: same running time, fewer frames, smaller file. Above it, nothing happens. |
 | `width` | INT | Output width in pixels. `0` keeps the source width, or derives it from `height`. |
 | `height` | INT | Output height in pixels. `0` keeps the source height, or derives it from `width`. |
+| `size_mode` | `pad` / `fit` | What `width` × `height` means when the source's aspect ratio differs: `pad` writes a GIF of exactly that size with transparent bars, `fit` writes the largest frame that fits inside it, with no bars. |
 | `resample` | see below | Filter used when scaling. |
 | `colors` | INT | Palette size, 2–256. Fewer colors means a smaller file and a stronger dither pattern. |
 | `palette_scope` | `global` / `per_frame` | One palette for the whole animation, or a fresh one per frame. |
@@ -245,9 +246,14 @@ Past 255 cells (`size` 13 for the triangular screen, 16 for the square one) the 
 
 **Global vs. per-frame palettes.** `global` builds one palette from every frame and writes it once as the GIF's global color table — no color flicker between frames, and no per-frame table to pay for (768 bytes each on a 256-color GIF). `per_frame` gives each frame its own palette, which is more accurate on animations whose content changes a lot, at the cost of a larger file and some flicker in flat areas.
 
-**Output size and transparent bars.** `width` and `height` set the canvas. The frame is scaled to fit inside it **keeping its aspect ratio**, centred, and whatever is left over is written as GIF transparency — so a 4:3 clip on a square canvas gets transparent bars top and bottom rather than a stretched picture. Leave either at `0` to derive it from the other, or both at `0` to keep the source size; nothing is padded unless the canvas and the source actually disagree about aspect ratio.
+**Output size and transparent bars.** `width` and `height` set a box, and the frame is scaled to fit inside it **keeping its aspect ratio** — it is never stretched. `size_mode` decides what happens to the room left over when the box and the source disagree about aspect ratio:
 
-The transparent slot costs one palette entry, so a letterboxed GIF quantizes to at most 255 colors instead of 256. The bars are transparent in the file itself; in the `images` output — which has no alpha channel — they come out as whichever color ended up in that slot, normally black.
+- `pad` (default): the box is the canvas. The frame is centred and whatever is left over is written as GIF transparency, so a 4:3 clip on a square canvas gets transparent bars top and bottom and the file is exactly `width` × `height`. Use this when the GIF has to be a fixed size.
+- `fit`: the box is an upper bound. The frame is written at the largest size that fits inside it and nothing is padded, so a 4:3 clip into a 512 × 512 box comes out 512 × 384. Use this when you want "no bigger than" rather than "exactly".
+
+Leave either axis at `0` to derive it from the other, or both at `0` to keep the source size; with fewer than two axes given there is nothing to pad and the two modes are identical.
+
+The transparent slot costs one palette entry, so a letterboxed GIF quantizes to at most 255 colors instead of 256. The bars are transparent in the file itself; in the `images` output — which has no alpha channel — they come out as whichever color ended up in that slot, normally black. `fit` never reserves the slot, so it keeps all 256.
 
 **Transparency in the picture.** Neither VIDEO nor IMAGE carries an alpha channel in ComfyUI, so the picture area is always written fully opaque. Only the letterbox bars are transparent. Composite onto a background before saving if you need transparency inside the frame.
 
@@ -348,6 +354,7 @@ VIDEO または画像バッチをアニメーション GIF として書き出し
 | `fps` | FLOAT | GIF のフレームレート。元のレートより下げるとフレームを間引きます（再生時間はそのまま、フレーム数が減り、ファイルが小さくなる）。元より上げても何も起きません。 |
 | `width` | INT | 出力の幅（ピクセル）。`0` でソースの幅のまま、または `height` から比率で決定。 |
 | `height` | INT | 出力の高さ（ピクセル）。`0` でソースの高さのまま、または `width` から比率で決定。 |
+| `size_mode` | `pad` / `fit` | ソースとアスペクト比が違うときの `width` × `height` の意味。`pad` はそのサイズのキャンバスに収めて余白を透過にし、`fit` はそのサイズに収まる最大サイズで余白なしに書き出します。 |
 | `resample` | 下記参照 | 拡大縮小に使うフィルタ。 |
 | `colors` | INT | パレットの色数、2〜256。少ないほどファイルは小さく、ディザの模様は強く出ます。 |
 | `palette_scope` | `global` / `per_frame` | アニメーション全体で 1 つのパレットを使うか、フレームごとに作り直すか。 |
@@ -525,9 +532,14 @@ ComfyUI_00042_.gif
 
 **global と per_frame パレット。** `global` は全フレームから 1 つのパレットを作り、GIF のグローバルカラーテーブルとして 1 回だけ書きます。フレーム間の色ちらつきが無く、フレームごとのローカルカラーテーブル（256 色なら 1 枚あたり 768 バイト）も不要です。`per_frame` はフレームごとにパレットを作るため、内容が大きく変わるアニメーションでは正確ですが、ファイルは大きくなり、平坦な部分でちらつきが出ます。
 
-**出力サイズと透過の余白。** `width` と `height` でキャンバスサイズを指定します。フレームはアスペクト比を維持したままキャンバスに収まるよう拡大縮小されて中央に配置され、余った領域は GIF の透過色として書き出されます。したがって 4:3 の素材を正方形のキャンバスに出すと、引き伸ばされるのではなく上下に透明な帯が付きます。片方を `0` にすればもう片方から比率で決まり、両方 `0` ならソースのサイズのままです。キャンバスとソースのアスペクト比が実際に食い違う場合以外、余白は発生しません。
+**出力サイズと透過の余白。** `width` と `height` で枠を指定し、フレームは**アスペクト比を維持したまま**その枠に収まるよう拡大縮小されます。引き伸ばされることはありません。枠とソースのアスペクト比が食い違うときに余った領域をどうするかは `size_mode` で選びます。
 
-透過にはパレットを 1 エントリ使うため、余白が付く場合の減色は 256 色ではなく最大 255 色になります。余白が透明なのはファイルの中での話で、アルファチャンネルを持たない `images` 出力では、そのエントリに割り当てられた色（通常は黒）として出てきます。
+- `pad`（デフォルト）: 枠をそのままキャンバスにします。フレームは中央に配置され、余った領域は GIF の透過色として書き出されます。4:3 の素材を正方形に出すと上下に透明な帯が付き、ファイルは `width` × `height` ちょうどのサイズになります。GIF のサイズを固定したいときはこちらです。
+- `fit`: 枠を上限として扱います。フレームは枠に収まる最大サイズで書き出され、余白は付きません。4:3 の素材を 512 × 512 の枠に出すと 512 × 384 になります。「ちょうど」ではなく「これ以下」にしたいときはこちらです。
+
+片方を `0` にすればもう片方から比率で決まり、両方 `0` ならソースのサイズのままです。両方指定していない場合は余白の出る余地がないため、2 つのモードは同じ結果になります。
+
+透過にはパレットを 1 エントリ使うため、余白が付く場合の減色は 256 色ではなく最大 255 色になります。余白が透明なのはファイルの中での話で、アルファチャンネルを持たない `images` 出力では、そのエントリに割り当てられた色（通常は黒）として出てきます。`fit` では透過エントリを確保しないため、256 色すべてが使えます。
 
 **画面内の透過。** ComfyUI の VIDEO も IMAGE もアルファチャンネルを持たないため、絵の部分は常に完全不透明で書き出されます。透明になるのは余白の帯だけです。フレーム内に透過が必要な場合は、保存前に背景を合成してください。
 

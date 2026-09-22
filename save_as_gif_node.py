@@ -33,6 +33,12 @@ except ImportError:  # ComfyUI too old, or the module imported outside ComfyUI
 
 PALETTE_SCOPES = ["global", "per_frame"]
 
+# What `width` x `height` means when the source does not share its aspect ratio.
+# `pad` is the original behavior and stays the default: the box is the canvas
+# and the leftover is transparent bars. `fit` scales the frame into the box and
+# writes it at that size, so the box is an upper bound rather than the output.
+SIZE_MODES = ["pad", "fit"]
+
 # Ordered best-quality-first for a downscale, which is what saving a GIF usually
 # is. `nearest` is last because it is the specialist: it is the only one that
 # keeps pixel art and hard-edged animation from turning to mush.
@@ -107,15 +113,21 @@ def _frame_delays(count, fps):
     return delays
 
 
-def _fit(source_width, source_height, width, height):
-    """Where a source frame lands on a `width` x `height` canvas.
+def _fit(source_width, source_height, width, height, mode="pad"):
+    """Where a source frame lands given a `width` x `height` box.
 
     Returns `(scaled_w, scaled_h, canvas_w, canvas_h, offset_x, offset_y)`. The
-    aspect ratio is always kept, so asking for a canvas the source does not match
-    leaves letterbox bars — those are what get written as transparent. A zero on
-    either axis means "derive it", and zero on both means "leave it alone", so
-    the widgets default to doing nothing.
+    aspect ratio is always kept; `mode` decides what happens to the room left
+    over when the box does not match it. `pad` treats the box as the canvas,
+    centres the frame and leaves letterbox bars — those are what get written as
+    transparent. `fit` makes the scaled frame itself the output, so the box is
+    only an upper bound and nothing is padded. A zero on either axis means
+    "derive it", and zero on both means "leave it alone", so the widgets default
+    to doing nothing; with fewer than two axes given there is nothing to pad and
+    the two modes agree.
     """
+    if mode not in SIZE_MODES:
+        raise ValueError(f"Unknown size mode: {mode}")
     if width <= 0 and height <= 0:
         return source_width, source_height, source_width, source_height, 0, 0
     if width <= 0:
@@ -128,6 +140,8 @@ def _fit(source_width, source_height, width, height):
     scale = min(width / source_width, height / source_height)
     scaled_w = max(1, round(source_width * scale))
     scaled_h = max(1, round(source_height * scale))
+    if mode == "fit":
+        return scaled_w, scaled_h, scaled_w, scaled_h, 0, 0
     return (
         scaled_w,
         scaled_h,
@@ -267,7 +281,7 @@ class SaveAsGif:
                         "min": 0,
                         "max": MAX_DIMENSION,
                         "step": 8,
-                        "tooltip": "Output width in pixels. 0 keeps the source width, or derives it from `height`. With both set, the frame is scaled to fit inside the canvas keeping its aspect ratio, and the leftover bars are written transparent.",
+                        "tooltip": "Output width in pixels. 0 keeps the source width, or derives it from `height`. With both set, the frame is scaled to fit inside the box keeping its aspect ratio; `size_mode` decides what happens to the room left over.",
                     },
                 ),
                 "height": (
@@ -278,6 +292,13 @@ class SaveAsGif:
                         "max": MAX_DIMENSION,
                         "step": 8,
                         "tooltip": "Output height in pixels. 0 keeps the source height, or derives it from `width`.",
+                    },
+                ),
+                "size_mode": (
+                    SIZE_MODES,
+                    {
+                        "default": "pad",
+                        "tooltip": "What `width` x `height` means when the source has a different aspect ratio. pad: the box is the canvas — the frame is centred and the leftover bars are written transparent, so the GIF is exactly the requested size. fit: the frame is scaled to the largest size that fits inside the box and written at that size, with no bars. Same thing whenever only one of width/height is set.",
                     },
                 ),
                 "resample": (
@@ -413,6 +434,9 @@ class SaveAsGif:
         loop_count,
         video=None,
         images=None,
+        # Keyword with a default so a queued prompt from before the widget
+        # existed still runs, and runs the way it used to.
+        size_mode="pad",
     ):
         if video is not None and images is not None:
             raise ValueError(
@@ -437,7 +461,7 @@ class SaveAsGif:
         if resample not in RESAMPLERS:
             raise ValueError(f"Unknown resample filter: {resample}")
         scaled_w, scaled_h, canvas_w, canvas_h, offset_x, offset_y = _fit(
-            int(source.shape[2]), int(source.shape[1]), width, height
+            int(source.shape[2]), int(source.shape[1]), width, height, size_mode
         )
         resized = (scaled_w, scaled_h) != (int(source.shape[2]), int(source.shape[1]))
         frames = _to_uint8(
