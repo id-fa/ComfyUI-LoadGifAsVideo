@@ -282,6 +282,7 @@ def _diversity(colors, counts, size, blend, dodither):
     size = min(size, n)
 
     colors_f = colors.astype(np.float64)
+    colors_sq = (colors_f * colors_f).sum(1)
     lum = luminance(colors)
 
     min_dist = np.full(n, np.inf)
@@ -323,13 +324,16 @@ def _diversity(colors, counts, size, blend, dodither):
             delta_l = np.abs(lum[pick] - lum[previous])
             penalty = np.where(delta_l > 64.0, delta_l * 4.0 / 255.0, 1.0)
             mixes = ((colors[pick] + colors[previous]) // 2).astype(np.float64)
-            # In chunks: the full (mixes, histogram, 3) block is 75 MB at 64
-            # chosen colors and a large histogram.
-            for start in range(0, len(mixes), 16):
-                block = mixes[start : start + 16]
-                spread = ((colors_f[None, :, :] - block[:, None, :]) ** 2).sum(2)
-                candidate = (spread * penalty[start : start + 16, None]).min(0)
-                np.minimum(min_dither, candidate, out=min_dither, where=min_dist > 0)
+            # Squared distance from every mix to every histogram color, expanded
+            # as |c|^2 - 2 c.m + |m|^2 so it is one matrix product rather than a
+            # (mixes, histogram, 3) difference block. Every operand is an
+            # integer well inside float64's exact range, so this is the same
+            # number the direct subtraction gives, at a fraction of the cost —
+            # this block is where a dithered per-frame palette spends its time.
+            mixes_sq = (mixes * mixes).sum(1)
+            spread = colors_sq[None, :] - 2.0 * (mixes @ colors_f.T) + mixes_sq[:, None]
+            candidate = (spread * penalty[:, None]).min(0)
+            np.minimum(min_dither, candidate, out=min_dither, where=min_dist > 0)
 
         chosen.append(pick)
 

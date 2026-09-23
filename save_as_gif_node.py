@@ -545,34 +545,44 @@ class SaveAsGif:
                 _with_transparency(shared.palette) if transparent else shared.palette
             )
 
-        # Per-frame palettes with a transparent slot are built up front so the
-        # slot can hold one color in every frame. Pillow decides how much of a
-        # frame to write by comparing it with the previous one *as colors*, so
-        # a slot whose color changed between frames would count as a change
-        # everywhere it appears — every bar, every unchanged pixel.
+        # Per-frame palettes are built up front, and the progress bar covers
+        # that pass as well as the write: a dithered `diversity` palette costs
+        # over half a second per frame, so a long clip spends minutes here, and
+        # a bar that only started ticking afterwards looked like a hang.
+        # Building them first is also what lets a transparent slot hold one
+        # color in every frame. Pillow decides how much of a frame to write by
+        # comparing it with the previous one *as colors*, so a slot whose color
+        # changed between frames would count as a change everywhere it appears
+        # — every bar, every unchanged pixel.
         ditherers = None
         spare = None
-        if shared is None and transparent:
-            ditherers = [
-                Ditherer(
-                    palette_for(frames[i : i + 1]),
-                    dither,
-                    dither_strength,
-                    halftone_size,
-                    halftone_ink,
-                    halftone_steps,
+        progress = None
+        if ProgressBar is not None:
+            progress = ProgressBar(count if shared is not None else 2 * count)
+        if shared is None:
+            ditherers = []
+            for i in range(count):
+                ditherers.append(
+                    Ditherer(
+                        palette_for(frames[i : i + 1]),
+                        dither,
+                        dither_strength,
+                        halftone_size,
+                        halftone_ink,
+                        halftone_steps,
+                    )
                 )
-                for i in range(count)
-            ]
-            try:
-                spare = _spare_color(np.vstack([d.palette for d in ditherers]))
-            except RuntimeError:
-                # Thousands of palettes can between them cover the lattice the
-                # scan walks. Each frame then picks its own; the file is still
-                # correct, only cropped less tightly.
-                spare = None
+                if progress is not None:
+                    progress.update(1)
+            if transparent:
+                try:
+                    spare = _spare_color(np.vstack([d.palette for d in ditherers]))
+                except RuntimeError:
+                    # Thousands of palettes can between them cover the lattice
+                    # the scan walks. Each frame then picks its own; the file is
+                    # still correct, only cropped less tightly.
+                    spare = None
 
-        progress = ProgressBar(count) if ProgressBar is not None else None
         delays = _frame_delays(count, float(frame_rate))
         pages = []
         durations = []
@@ -582,17 +592,7 @@ class SaveAsGif:
         for i in range(count):
             ditherer, palette = shared, shared_palette
             if ditherer is None:
-                if ditherers is not None:
-                    ditherer = ditherers[i]
-                else:
-                    ditherer = Ditherer(
-                        palette_for(frames[i : i + 1]),
-                        dither,
-                        dither_strength,
-                        halftone_size,
-                        halftone_ink,
-                        halftone_steps,
-                    )
+                ditherer = ditherers[i]
                 palette = (
                     _with_transparency(ditherer.palette, spare)
                     if transparent
