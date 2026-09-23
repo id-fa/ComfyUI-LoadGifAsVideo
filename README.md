@@ -8,6 +8,9 @@ Two nodes for turning short looping material into a VIDEO stream of the length y
 
 - **Load GIF as Video** — reads an animated GIF / APNG / animated WEBP from the ComfyUI input directory.
 - **Loop Video** — takes any existing VIDEO (e.g. a short MP4 from the stock `Load Video`) and loops it.
+
+Plus one extra node for the other direction, so a GIF can come back out of the workflow as well as go in:
+
 - **Save as GIF** — writes a VIDEO or an image batch back out as an animated GIF, with a full set of color quantizers and dithering filters.
 
 ## Why
@@ -81,6 +84,7 @@ Writes a VIDEO or an image batch out as an animated GIF. GIF holds at most 256 c
 | `loop_count` | INT | How many extra times the GIF replays. `0` loops forever. |
 | `frame_diff` | BOOLEAN | Write only the pixels that changed since the previous frame and mark the rest transparent, so the viewer keeps what is already there. Costs one palette entry. Off by default. See *Frame differencing* below. |
 | `pillow_optimize` | BOOLEAN | Pass `optimize=True` to Pillow's GIF writer, which trims each frame's colour table to the colours it uses. It rebuilds the palette per frame, so a `global` palette stops being shared and the file may grow. Off by default. |
+| `gamma` | FLOAT | Tone correction applied to the frames before anything else, 0.1–10. `1` leaves them alone; above it brightens the midtones, below it darkens them, black and white stay put. Meant for the `-mask` dithers, whose ink screen makes the picture read darker (black ink) or lighter (white ink) than it is — see [Mask screens](#mask-screens). Works with every dither. |
 
 | Output | Type | Description |
 | --- | --- | --- |
@@ -133,6 +137,8 @@ Every other halftone here decides a covered pixel's colour *from that pixel*, so
 - At full strength the dots cover half of every cell, which is where a screen's rows start to touch: `halftone-mask` then reads as horizontal stripes and `halftone-square-mask` as a grid. `halftone-diamond-mask` is the one to pick for a mesh, since its rows run diagonally; `halftone-brick-mask` for staggered rows of separate, equal dots, with `dither_strength` setting the gap between them.
 
 Unlike the poster dithers, these keep the picture's own colours in the ground — the screen masks the image rather than replacing it.
+
+**The screen changes the picture's apparent brightness, and `gamma` is there to correct it.** At full strength half of every cell is ink, so a black screen reads about half as bright as the source and a white one about half as bright again the other way — the picture itself is untouched, but the eye averages the dots in. `gamma` lifts or lowers the midtones of the frames *before* the palette is built and the screen is laid on, and the ink is a fixed colour that never sees it, so the correction lands only on the ground between the dots. Raise it for black ink (`1.5`–`2.5` is the useful range at full strength; `2` roughly restores the midtones), lower it for white ink (`0.5`–`0.7`). Black and white stay where they are, so highlights do not clip and shadows do not fill in. The widget works with every dither, and the `images` output shows the corrected result.
 
 **The `-mask-inverted` methods swap the two regions.** `halftone-mask-inverted`, `halftone-square-mask-inverted`, `halftone-diamond-mask-inverted` and `halftone-brick-mask-inverted` use exactly the same lattice, dot and ink as their `-mask` counterparts, but the dots are the windows the picture shows through and the ink fills everything between them — the output is the pixel-for-pixel complement of the plain mask. `dither_strength` then sets how much of the *picture* shows, half at `1.0`, so lowering it shrinks the windows (or, on the brick lattice, spreads them apart) and lets the ink take over; `0` still removes the screen rather than painting the frame solid. At full strength the two variants are the same halftone with the ink and the picture exchanged; at low strength the plain mask is a faint screen over an intact picture, and the inverted one is a field of ink with the picture peeking through small holes.
 
@@ -313,6 +319,9 @@ The quantizers and dithering filters are clean-room implementations written from
 
 - **Load GIF as Video** — ComfyUI の `input` ディレクトリにあるアニメーション GIF / APNG / アニメーション WEBP を読み込みます。
 - **Loop Video** — 既存の VIDEO（標準の `Load Video` で読み込んだ短い MP4 など）を受け取ってループさせます。
+
+おまけとして、逆方向の GIF 保存用ノードも 1 つ入っています。GIF を読み込むだけでなく、ワークフローの結果を GIF に戻すこともできます。
+
 - **Save as GIF** — VIDEO または画像バッチをアニメーション GIF として書き出します。減色アルゴリズムとディザリングフィルタを一通り備えています。
 
 ## このノードの主旨
@@ -386,6 +395,7 @@ VIDEO または画像バッチをアニメーション GIF として書き出し
 | `loop_count` | INT | GIF を追加で何回再生するか。`0` で無限ループ。 |
 | `frame_diff` | BOOLEAN | 前フレームから変化したピクセルだけを書き、残りは透過にしてビューアに前の絵を残させます。パレットを 1 エントリ消費します。デフォルトはオフ。下の「フレーム差分」を参照。 |
 | `pillow_optimize` | BOOLEAN | Pillow の GIF ライタに `optimize=True` を渡します。各フレームのカラーテーブルをそのフレームが使う色だけに詰めますが、パレットをフレームごとに組み直すため `global` パレットが共有されなくなり、ファイルが大きくなることもあります。デフォルトはオフ。 |
+| `gamma` | FLOAT | フレームに最初に掛けるトーン補正、0.1〜10。`1` で無補正、大きくすると中間調が明るく、小さくすると暗くなります（黒と白は動きません）。主に `-mask` 系ディザ向けで、インクの網点で絵が実際より暗く（黒インク）または明るく（白インク）見えるのを補正します。[マスクスクリーン](#マスクスクリーン)を参照。どのディザでも効きます。 |
 
 | 出力 | 型 | 説明 |
 | --- | --- | --- |
@@ -438,6 +448,8 @@ diversity 系の 2 つは、ディザを掛けるかどうかで選ぶ色その�
 - 強度最大では網点が各セルの半分を覆い、ちょうど網点の列同士が接し始める大きさです。このとき `halftone-mask` は横縞に、`halftone-square-mask` は格子線に見えます。網目状にしたいときは列が斜めに走る `halftone-diamond-mask`、同じ大きさのドットを互い違いの行に並べて隙間を `dither_strength` で開けたいときは `halftone-brick-mask` を選んでください。
 
 ポスタライズ系と違い、地には元絵の色が残ります。画像を置き換えるのではなく、網でマスクする方式です。
+
+**網点を重ねると絵の見かけの明るさが変わるため、その補正用に `gamma` があります。** 強度最大では各セルの半分がインクなので、黒インクでは元絵のおよそ半分の明るさに、白インクでは逆に明るく見えます。絵そのものは触られていませんが、目はドットを平均して見るからです。`gamma` はパレットを作り網点を重ねる*前*にフレームの中間調を持ち上げたり下げたりします。インクは固定色で補正の影響を受けないので、補正が効くのはドットの隙間の地だけです。黒インクなら上げ（強度最大なら `1.5`〜`2.5` が実用域で、`2` でおおむね中間調が戻ります）、白インクなら下げてください（`0.5`〜`0.7`）。黒と白は動かないため、ハイライトが飛んだりシャドウが潰れたりはしません。このウィジェットはどのディザでも効き、`images` 出力にも補正後の結果が出ます。
 
 **`-mask-inverted` 系は、絵が見える部分とマスクされる部分を入れ替えたものです。** `halftone-mask-inverted`、`halftone-square-mask-inverted`、`halftone-diamond-mask-inverted`、`halftone-brick-mask-inverted` は、対応する `-mask` と格子・ドット・インクがまったく同じで、ドットが「窓」になって中から元絵が見え、ドットの外側はすべてインクで塗り潰されます。出力は素の `-mask` のピクセル単位の補集合です。`dither_strength` はこのとき**元絵が見える割合**を決め、`1.0` で半分になります。下げると窓が縮み（レンガ積み格子では窓の間隔が広がり）、インクの面積が増えます。`0` はフレームをインクで塗り潰すのではなく、これまで通り網点を外します。強度最大では両者はインクと絵を入れ替えただけの同じ網点ですが、強度を下げると、素の `-mask` は無傷の絵に薄く網が乗った状態、`-mask-inverted` はインクの面に小さな穴から絵が覗く状態になります。
 

@@ -65,6 +65,13 @@ _MIN_DELAY_CS = 2
 # can always be saved.
 _MAX_FRAMES = 10000
 
+# `gamma` follows the image-editor convention (Photoshop's Levels midtone,
+# ImageMagick's -gamma): 1.0 is a no-op, above it brightens, below it darkens.
+# The range is wide on purpose — a black mask screen at full strength halves the
+# average tone, and pulling the midtones back up from that takes a value near 2.
+MIN_GAMMA = 0.1
+MAX_GAMMA = 10.0
+
 
 def _decimate(count, source_rate, output_rate):
     """Indices that resample `count` frames down to `output_rate`, and the rate used.
@@ -201,12 +208,17 @@ def _with_transparency(palette, spare=None):
     return np.vstack([spare, palette]).astype(np.uint8)
 
 
-def _to_uint8(images, size=None, resample=None):
+def _to_uint8(images, size=None, resample=None, gamma=1.0):
     """A ComfyUI IMAGE batch as a uint8 [N, H, W, 3] array, optionally scaled.
 
     Converted a frame at a time: the whole batch as float32 is four times the
     size of the result, and a long animation is already large. Scaling in the
     same pass keeps the full-resolution copy from ever existing.
+
+    `gamma` is applied here, on the float frame before it is rounded to 8 bits,
+    so the tone curve costs no precision and every later stage — the palette,
+    the dither, the `images` output — sees the corrected frame. Black and white
+    stay where they are; only the midtones move.
     """
     count, height, width = (int(images.shape[k]) for k in range(3))
     if size is not None:
@@ -215,13 +227,22 @@ def _to_uint8(images, size=None, resample=None):
         raise ValueError("There are no frames to save")
     if count > _MAX_FRAMES:
         raise ValueError(f"Cannot save {count} frames; the limit is {_MAX_FRAMES}")
+    gamma = float(gamma)
+    if not MIN_GAMMA <= gamma <= MAX_GAMMA:
+        raise ValueError(f"gamma must be between {MIN_GAMMA} and {MAX_GAMMA}")
+    # Skipped at exactly 1.0 so the default stays bit-exact with what the node
+    # wrote before the widget existed, rather than trusting pow(x, 1.0) to be.
+    exponent = None if gamma == 1.0 else 1.0 / gamma
 
     frames = np.empty((count, height, width, 3), dtype=np.uint8)
     for i in range(count):
         frame = images[i, ..., :3]
         if torch.is_tensor(frame):
             frame = frame.detach().cpu().numpy()
-        scaled = np.clip(np.rint(np.asarray(frame, dtype=np.float32) * 255.0), 0, 255)
+        linear = np.clip(np.asarray(frame, dtype=np.float32), 0.0, 1.0)
+        if exponent is not None:
+            linear = np.power(linear, np.float32(exponent))
+        scaled = np.clip(np.rint(linear * 255.0), 0, 255)
         if size is None:
             frames[i] = scaled
         else:
@@ -403,6 +424,16 @@ class SaveAsGif:
                         "tooltip": "Pass optimize=True to Pillow's GIF writer. It trims each frame's color table to the colors that frame actually uses and marks unchanged pixels transparent. Note that it rebuilds the palette per frame, so palette_scope=global no longer gives one shared table and the file may grow instead of shrink. Try it and read the size in `info`.",
                     },
                 ),
+                "gamma": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": MIN_GAMMA,
+                        "max": MAX_GAMMA,
+                        "step": 0.05,
+                        "tooltip": "Tone correction applied to the frames before the palette is built and the dither runs. 1.0 leaves them alone; above it brightens the midtones, below it darkens them, and black and white stay put. It exists mainly for the -mask dithers: a black ink screen covers up to half the frame and makes the picture read darker than it is, a white one makes it read lighter. Raise gamma (around 1.5-2.5) to compensate for black ink, lower it (around 0.5-0.7) for white. Works with every dither, and the `images` output shows the corrected result.",
+                    },
+                ),
             },
             "optional": {
                 "video": (
@@ -456,6 +487,7 @@ class SaveAsGif:
         size_mode="pad",
         frame_diff=False,
         pillow_optimize=False,
+        gamma=1.0,
     ):
         if video is not None and images is not None:
             raise ValueError(
@@ -483,10 +515,15 @@ class SaveAsGif:
             int(source.shape[2]), int(source.shape[1]), width, height, size_mode
         )
         resized = (scaled_w, scaled_h) != (int(source.shape[2]), int(source.shape[1]))
+        # The tone curve goes in here, ahead of everything that looks at colors:
+        # a mask screen's ink is fixed and never sees it, so raising gamma lifts
+        # only the ground between the dots, which is exactly the part a black
+        # screen makes look too dark.
         frames = _to_uint8(
             source,
             (scaled_w, scaled_h) if resized else None,
             RESAMPLERS[resample],
+            gamma,
         )
         count = frames.shape[0]
 
