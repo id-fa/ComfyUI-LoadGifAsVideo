@@ -169,15 +169,17 @@
         512,
         "fit",
         "lanczos",
-        32,
+        127,
         "per_frame",
         "median_cut_aforge",
-        "halftone-square",
+        "halftone-diamond-mask-inverted",
         1,
-        2,
-        2,
-        "black",
-        0
+        3,
+        0,
+        "white",
+        0,
+        false,
+        false
       ],
       "widgets_values_named": {
         "filename_prefix": "ComfyUI",
@@ -187,15 +189,17 @@
         "height": 512,
         "size_mode": "fit",
         "resample": "lanczos",
-        "colors": 32,
+        "colors": 127,
         "palette_scope": "per_frame",
         "quantizer": "median_cut_aforge",
-        "dither": "halftone-square",
+        "dither": "halftone-diamond-mask-inverted",
         "dither_strength": 1,
-        "halftone_size": 2,
-        "halftone_steps": 2,
-        "halftone_ink": "black",
-        "loop_count": 0
+        "halftone_size": 3,
+        "halftone_steps": 0,
+        "halftone_ink": "white",
+        "loop_count": 0,
+        "frame_diff": false,
+        "pillow_optimize": false
       }
     },
     {
@@ -270,7 +274,7 @@
   "config": {},
   "extra": {
     "comfyui_mcp": {
-      "workflow_uuid": "09feda3d-d1d4-42c6-96de-cd9523b60496"
+      "workflow_uuid": "f7452cb0-e58f-4962-8335-716cdd63176d"
     },
     "ue_links": [],
     "links_added_by_ue": [],
