@@ -4,10 +4,11 @@
 
 ![Screenshot1](docs/screenshot.webp)
 
-Two nodes for turning short looping material into a VIDEO stream of the length you actually need:
+Three nodes for turning short looping material into a VIDEO stream of the length you actually need:
 
 - **Load GIF as Video** — reads an animated GIF / APNG / animated WEBP from the ComfyUI input directory.
 - **Loop Video** — takes any existing VIDEO (e.g. a short MP4 from the stock `Load Video`) and loops it.
+- **Load Video (Trim & Loop Assist)** — loads a frame range of an MP4 / WEBM / MKV… file, optionally cropped, from a panel that scrubs the file and finds the frames where the picture repeats, so a seamless loop can be cut before it goes into `Loop Video`.
 
 Plus one extra node for the other direction, so a GIF can come back out of the workflow as well as go in:
 
@@ -57,6 +58,38 @@ Loops any VIDEO — an MP4 or WEBM via the stock `Load Video`, a generated video
 | `images` | IMAGE | The looped frames as an image batch. `speed` is baked into these frames — see [Speed and the `images` output](#speed-and-the-images-output). |
 
 **Audio.** At `speed = 1.0` the audio is looped along with the frames: the source's audio is fitted to exactly one video loop (truncated or zero-padded) and then repeated, so every loop restarts in sync with frame 0. At any other speed only the frame rate changes, which would put the audio out of sync — so the audio is dropped. If you need the audio at a different speed, retime it separately.
+
+### Load Video (Trim & Loop Assist)
+
+Loads a frame range of a video file as a VIDEO (with the audio of that range) and as an IMAGE batch, cropped if you ask. The node has its own panel: a scrubbable preview, a draggable range and crop box, and a *loop assist* that lists the frames which look like the one under the playhead. All of that works on the file directly — nothing has to be queued to search.
+
+| Input | Type | Description |
+| --- | --- | --- |
+| `file` | COMBO | Video file in the ComfyUI `input` directory (MP4, WEBM, MKV, MOV, AVI, …). Upload with the panel's button or drop a file onto the preview. A new node starts blank. |
+| `start_frame` | INT | First frame of the range, counting from 0. |
+| `end_frame` | INT | The frame the range stops **before**; it is not included. `0` means the end of the file. |
+| `crop_x`, `crop_y` | INT | Top-left corner of the crop box in pixels. |
+| `crop_w`, `crop_h` | INT | Size of the crop box in pixels. `0` runs to the right / bottom edge, so all zeros is no crop. |
+
+| Output | Type | Description |
+| --- | --- | --- |
+| `video` | VIDEO | The range, cropped, at the file's own frame rate, with its audio. |
+| `images` | IMAGE | The same frames as an image batch. |
+
+**`end_frame` is exclusive, and that is the point.** The range is `start_frame <= frame < end_frame`. When the loop assist finds that frame 340 looks like frame 100, set `start_frame = 100` and `end_frame = 340`: the output is frames 100–339, and looping it jumps from 339 back to 100, which is what 340 looked like. An inclusive end would show that picture twice at the seam. The panel's two thumbnails show exactly these two frames — `Start` and `End (excluded, loop returns here)`, cropped the way the node will cut them — so a seamless loop is one where they look the same.
+
+**The panel.** The timeline shows the range as a blue band with a handle at each end, the playhead in red, and search hits in orange. Click or drag anywhere on it to move the playhead (the mouse wheel over the bar steps one frame, ten with `Shift`; elsewhere it still zooms the graph), drag the handles to move the range, or use the buttons and keys: `←` / `→` step one frame (`Shift` for ten), `Home` / `End` jump to the range ends, `Space` plays the range in a loop, `[` and `]` set `start_frame` / `end_frame` to the playhead. `Crop` shows the crop box on the preview; drag its edges or corners, or move it, pick an aspect ratio, or type a size. Everything the panel does lands in the ordinary widgets above it, and typing into those moves the panel.
+
+**Loop assist.** Scrub to the frame you want the loop to start (or end) on and press `Find similar`. Every frame whose picture matches it at least `similarity %` is listed with its frame number, time and score, and marked on the timeline; the query frame itself heads the list, so one click brings you back to it after looking at the candidates. Click an entry to jump there and look at it; `start` / `end` on the entry set the range once you have decided. Two settings:
+
+- `frames` — how many consecutive frames have to match (default 1). With 2 or 3, the frames *after* the hit must match the frames after the query too, so the motion continues the same way rather than coinciding for a single picture. In practice 1 is the setting: real footage never matches that long, and animation is often drawn on twos.
+- `similarity %` — the threshold. 100 is identical. Lossy encoding, noise and banding keep repeated frames from being bit-identical, so the default is 98; a re-encode of the same picture scores about 99.5, and the neighbouring frames of slow motion about 98–99. Raise it when the list is full of near-misses, lower it when a repeat you can see is missing.
+
+A still passage matches itself for dozens of frames; those are collapsed into one entry (the best of the run, with the run's extent shown), and the run the query frame itself belongs to is left out. The list stops at the best 100 hits and says so — raise the threshold rather than scrolling.
+
+**Frame numbers are exact.** The first time a file is opened, the server decodes it once to record every frame's timestamp and a small fingerprint; that is what the search compares and what the thumbnails, the panel and the node all seek by, so frame 340 is the same frame everywhere. The pass takes about as long as decoding the file and is kept in memory, so later searches are instant and the node reuses it when the graph runs. The preview itself is the browser's video player; if it cannot play the container (MKV, AVI…), the panel shows server-rendered frames instead and stepping still works, only playback is off.
+
+**Audio** is cut to the same range. **Length and speed** are deliberately not here — hand the output to `Loop Video` for that. The range is capped at 10000 frames.
 
 ### Save as GIF
 
@@ -180,7 +213,7 @@ The ordered screens depend on the pixel's position alone, so they are **stable f
 
 ## Behavior
 
-The length and speed controls behave identically in both nodes.
+The length and speed controls behave identically in `Load GIF as Video` and `Loop Video`. `Load Video (Trim & Loop Assist)` has neither — it cuts a range and leaves length and speed to `Loop Video`.
 
 **Frame rate is automatic.** The `video` output's frame rate comes from the source itself — its own rate multiplied by `speed`. There is no fps widget. Frames are never interpolated, and at `speed = 1.0` both outputs are a frame-for-frame copy of the source at its original timing.
 
@@ -299,7 +332,7 @@ cd ComfyUI/custom_nodes
 git clone https://github.com/id-fa/ComfyUI-LoadGifAsVideo
 ```
 
-Then restart ComfyUI. There are no extra Python dependencies — Pillow, NumPy and PyTorch all ship with ComfyUI.
+Then restart ComfyUI. There are no extra Python dependencies — Pillow, NumPy, PyTorch and PyAV all ship with ComfyUI.
 
 Requires a ComfyUI version that has the `VIDEO` type (`comfy_api.input_impl`). On older builds the nodes load but raise a clear error when run.
 
@@ -315,10 +348,11 @@ The quantizers and dithering filters are clean-room implementations written from
 
 [English](#comfyui-loadgifasvideo) | **日本語**
 
-短いループ素材を、実際に必要な長さの VIDEO ストリームに変換する 2 つのノードです。
+短いループ素材を、実際に必要な長さの VIDEO ストリームに変換する 3 つのノードです。
 
 - **Load GIF as Video** — ComfyUI の `input` ディレクトリにあるアニメーション GIF / APNG / アニメーション WEBP を読み込みます。
 - **Loop Video** — 既存の VIDEO（標準の `Load Video` で読み込んだ短い MP4 など）を受け取ってループさせます。
+- **Load Video (Trim & Loop Assist)** — MP4 / WEBM / MKV などの動画ファイルから、フレーム範囲を（必要ならクロップして）読み込みます。ファイルをスクラブしながら範囲を決められるパネル付きで、絵が繰り返す位置を探す「ループアシスト」により、`Loop Video` に渡す前に継ぎ目のないループを切り出せます。
 
 おまけとして、逆方向の GIF 保存用ノードも 1 つ入っています。GIF を読み込むだけでなく、ワークフローの結果を GIF に戻すこともできます。
 
@@ -368,6 +402,38 @@ The quantizers and dithering filters are clean-room implementations written from
 | `images` | IMAGE | ループさせたフレームを画像バッチにしたもの。`speed` はこのフレーム自体に焼き込まれます（[`speed` と `images` 出力](#speed-と-images-出力)を参照）。 |
 
 **オーディオについて。** `speed = 1.0` のときは、フレームと一緒にオーディオもループします。元のオーディオをちょうど動画 1 ループ分の長さに合わせた（切り詰めるか、ゼロ埋めする）うえで繰り返すので、どのループもフレーム 0 と同期して始まります。それ以外の速度ではフレームレートだけが変化するため、オーディオがずれてしまいます。そのためオーディオは破棄されます。速度を変えたうえでオーディオが必要な場合は、別途タイムストレッチしてください。
+
+### Load Video (Trim & Loop Assist)
+
+動画ファイルのフレーム範囲を、その範囲のオーディオ付きの VIDEO と IMAGE バッチとして読み込みます。クロップも指定できます。ノードには専用のパネルがあり、スクラブできるプレビュー、ドラッグで動かせる範囲とクロップ枠、そして再生ヘッド位置のフレームと似たフレームを一覧する「ループアシスト」を備えています。いずれもファイルに対して直接動作するので、探索のためにグラフを実行する必要はありません。
+
+| 入力 | 型 | 説明 |
+| --- | --- | --- |
+| `file` | COMBO | ComfyUI の `input` ディレクトリにある動画ファイル（MP4、WEBM、MKV、MOV、AVI など）。パネルのボタンからアップロードするか、プレビューにファイルをドロップします。追加直後のノードは未選択です。 |
+| `start_frame` | INT | 範囲の最初のフレーム（0 始まり）。 |
+| `end_frame` | INT | 範囲が**その手前で終わる**フレーム。このフレーム自体は含まれません。`0` はファイル末尾まで。 |
+| `crop_x`, `crop_y` | INT | クロップ枠の左上座標（ピクセル）。 |
+| `crop_w`, `crop_h` | INT | クロップ枠のサイズ（ピクセル）。`0` は右端 / 下端まで。すべて 0 ならクロップなしです。 |
+
+| 出力 | 型 | 説明 |
+| --- | --- | --- |
+| `video` | VIDEO | 指定範囲をクロップしたもの。フレームレートはファイルのまま、オーディオ付き。 |
+| `images` | IMAGE | 同じフレームの画像バッチ。 |
+
+**`end_frame` は範囲に含まれず、それが狙いです。** 範囲は `start_frame <= frame < end_frame` です。ループアシストでフレーム 340 がフレーム 100 と同じ絵だと分かったら、`start_frame = 100`、`end_frame = 340` にします。出力はフレーム 100〜339 になり、ループ再生では 339 から 100 に戻ります。100 は 340 と同じ絵なので継ぎ目が出ません。終端を含める方式だと、継ぎ目で同じ絵が 2 回表示されてしまいます。パネルの 2 枚のサムネイルはまさにこの 2 フレーム、`Start` と `End (excluded, loop returns here)` を、ノードが切り出すのと同じクロップで表示するので、両者が同じに見えればループは滑らかです。
+
+**パネル。** タイムラインには範囲が青い帯と両端のハンドル、再生ヘッドが赤、検索結果がオレンジで表示されます。クリックやドラッグで再生ヘッドを動かし（バーの上ではマウスホイールで 1 フレームずつ、`Shift` で 10 フレームずつ移動します。バー以外ではこれまで通りグラフのズームです）、ハンドルのドラッグで範囲を変えられます。ボタンとキーでも操作できます: `←` / `→` で 1 フレーム移動（`Shift` で 10 フレーム）、`Home` / `End` で範囲の両端へ、`Space` で範囲をループ再生、`[` と `]` で再生ヘッド位置を `start_frame` / `end_frame` に設定。`Crop` を押すとプレビューにクロップ枠が出ます。辺や角をドラッグして拡縮、枠の内側をドラッグして移動、アスペクト比の固定やサイズの直接入力もできます。パネルでの操作はすべて上のウィジェットの値に反映され、ウィジェットに数値を入力すればパネル側も動きます。
+
+**ループアシスト。** ループの始点（または終点）にしたいフレームへスクラブして `Find similar` を押します。`similarity %` 以上で一致したフレームがフレーム番号・時刻・スコアとともに一覧され、タイムラインにもマークされます。一覧の先頭は検索元のフレーム自身なので、候補を見て回ったあとも 1 クリックで戻れます。項目をクリックするとそのフレームへ飛んで目視確認できます。決めたら項目の `start` / `end` で範囲に設定します。設定項目は 2 つです。
+
+- `frames` — 連続して一致させるフレーム数（省略時 1）。2 や 3 にすると、ヒットしたフレームの次以降も検索元の次以降と一致する必要があるため、たまたま 1 枚だけ似た絵ではなく、動きの続きも同じであることが期待できます。ただし実写では完全一致はまずなく、アニメは 2 コマ打ちで動くこともあるので、基本は 1 です。
+- `similarity %` — しきい値。100 が完全一致です。不可逆圧縮のノイズやバンディングのため繰り返しフレームもビット単位では一致しないので、既定値は 98 です。同じ絵の再エンコードは 99.5 前後、ゆっくりした動きの隣接フレームは 98〜99 程度になります。惜しいだけのフレームばかり並ぶなら上げ、見て分かる繰り返しが出てこないなら下げてください。
+
+静止している区間は何十フレームも自分自身と一致してしまうので、連続する一致は 1 項目にまとめられ（区間内で最良のフレームを代表にし、区間の範囲も表示します）、検索元フレーム自身が属する区間は除外されます。一覧は上位 100 件で打ち切られ、その旨が表示されます。スクロールするより、しきい値を上げてください。
+
+**フレーム番号は正確です。** ファイルを初めて開いたとき、サーバーが一度だけ全体をデコードして各フレームのタイムスタンプと小さなフィンガープリントを記録します。検索はこれを比較し、サムネイル・パネル・ノードのすべてがこれを使ってシークするので、フレーム 340 はどこでも同じフレームです。この処理はファイルのデコードと同程度の時間がかかり、結果はメモリに保持されるため、以降の検索は一瞬で、グラフ実行時のノードも再利用します。プレビュー自体はブラウザの動画プレイヤーです。ブラウザが再生できないコンテナ（MKV、AVI など）では、代わりにサーバーが描画したフレームを表示します。コマ送りはそのまま使え、再生だけが無効になります。
+
+**オーディオ**も同じ範囲に切り出されます。**長さと速度**の指定は意図的にありません。出力を `Loop Video` に渡してください。範囲は 10000 フレームが上限です。
 
 ### Save as GIF
 
@@ -491,7 +557,7 @@ diversity 系の 2 つは、ディザを掛けるかどうかで選ぶ色その�
 
 ## 動作
 
-長さと速度の制御は、両方のノードで同じ挙動になります。
+長さと速度の制御は、`Load GIF as Video` と `Loop Video` で同じ挙動になります。`Load Video (Trim & Loop Assist)` にはどちらもありません。範囲を切り出すだけで、長さと速度は `Loop Video` に任せます。
 
 **フレームレートは自動です。** `video` 出力のフレームレートはソース自身のレートに `speed` を掛けたもので、fps ウィジェットはありません。フレームの補間は一切行わず、`speed = 1.0` では両方の出力が元のタイミングのままフレーム単位で忠実なコピーになります。
 
