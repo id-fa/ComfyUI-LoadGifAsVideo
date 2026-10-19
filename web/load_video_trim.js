@@ -25,12 +25,16 @@ const PROP = "loop_assist"
 const ROUTE = "/loadgifasvideo/video"
 const ACCENT = "#38bdf8"
 const MATCH = "#f59e0b"
-const MIN_WIDTH = 560
-const PANEL_MIN_HEIGHT = 470
+const MIN_WIDTH = 620
+const PANEL_MIN_HEIGHT = 520
 const THUMB_SIZE = 256
 const PREVIEW_SIZE = 768
 const FINGERPRINT_SIZES = [16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 640]
 const FINGERPRINT_DEFAULT = 32
+const METRICS = [
+  ["pixels", "pixels"],
+  ["motion", "motion-weighted"],
+]
 const HANDLE_GRAB = 8 // px either side of a range handle that grabs it
 
 const ASPECTS = [
@@ -51,7 +55,7 @@ const STYLE = `
   padding:6px; font:12px/1.3 sans-serif; color:#ddd; background:#1b1b1b; border-radius:6px;
   overflow:hidden; outline:none; user-select:none; }
 .lgav-root:focus-within { box-shadow: inset 0 0 0 1px ${ACCENT}55; }
-.lgav-row { display:flex; align-items:center; gap:5px; flex-wrap:wrap; min-height:22px; }
+.lgav-row { display:flex; align-items:center; gap:5px; flex-wrap:wrap; min-height:22px; flex-shrink:0; }
 .lgav-row .lgav-grow { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .lgav-root button { background:#2e2e2e; color:#ddd; border:1px solid #444; border-radius:4px;
   padding:2px 7px; font:inherit; cursor:pointer; line-height:16px; white-space:nowrap; }
@@ -77,7 +81,7 @@ const STYLE = `
   box-shadow:0 0 0 9999px rgba(0,0,0,.55); }
 .lgav-crop .lgav-grid { position:absolute; pointer-events:none; border-color:rgba(255,255,255,.25); border-style:dashed; border-width:0; }
 .lgav-handle { position:absolute; width:14px; height:14px; box-sizing:border-box; border:0 solid ${ACCENT}; }
-.lgav-timeline { display:flex; flex-direction:column; gap:2px; }
+.lgav-timeline { display:flex; flex-direction:column; gap:2px; flex-shrink:0; }
 .lgav-ruler { position:relative; height:12px; font-size:10px; color:#999; }
 .lgav-ruler span { position:absolute; top:0; transform:translateX(-50%); white-space:nowrap; }
 .lgav-ruler span:first-child { transform:none; }
@@ -91,7 +95,7 @@ const STYLE = `
   box-shadow:0 0 3px #000; }
 .lgav-playhead { position:absolute; top:0; bottom:0; width:2px; margin-left:-1px; background:#ff4d4d; pointer-events:none; }
 .lgav-playhead::before { content:""; position:absolute; top:0; left:-4px; border:5px solid transparent; border-top-color:#ff4d4d; }
-.lgav-results { max-height:112px; min-height:22px; overflow-y:auto; background:#111; border:1px solid #333; border-radius:4px;
+.lgav-results { max-height:112px; min-height:22px; flex-shrink:0; overflow-y:auto; background:#111; border:1px solid #333; border-radius:4px;
   padding:2px; display:flex; flex-direction:column; gap:1px; }
 .lgav-res { display:flex; align-items:center; gap:6px; padding:1px 4px; border-radius:3px; cursor:pointer; }
 .lgav-res:hover { background:#222; }
@@ -100,7 +104,7 @@ const STYLE = `
 .lgav-res.lgav-qrow .lgav-accent { color:#fff; }
 .lgav-res .lgav-grow { flex:1; }
 .lgav-res button { padding:0 5px; line-height:15px; }
-.lgav-thumbs { display:flex; gap:6px; }
+.lgav-thumbs { display:flex; gap:6px; flex-shrink:0; }
 .lgav-thumb { flex:1 1 0; min-width:0; display:flex; flex-direction:column; gap:2px; align-items:stretch; }
 .lgav-thumb .lgav-img { height:80px; background:#000; border-radius:3px; display:flex; align-items:center; justify-content:center; overflow:hidden; }
 .lgav-thumb img { max-width:100%; max-height:100%; object-fit:contain; }
@@ -161,6 +165,9 @@ class TrimPanel {
     this.similarity = 98
     this.fingerprint = FINGERPRINT_DEFAULT
     this.rangeOnly = false
+    this.cropOnly = true
+    this.metric = "pixels"
+    this.blur = 0
     this.busy = false
     this.configuring = false
     this.loadedFile = null
@@ -250,6 +257,9 @@ class TrimPanel {
       similarity: this.similarity,
       fingerprint: this.fingerprint,
       rangeOnly: this.rangeOnly,
+      cropOnly: this.cropOnly,
+      metric: this.metric,
+      blur: this.blur,
       cropOn: this.cropOn,
       aspect: this.aspect,
     }
@@ -267,6 +277,12 @@ class TrimPanel {
     this.ui.fingerprint.value = String(this.fingerprint)
     this.rangeOnly = !!p.rangeOnly
     this.ui.rangeOnly.checked = this.rangeOnly
+    this.cropOnly = p.cropOnly == null ? true : !!p.cropOnly
+    this.ui.cropOnly.checked = this.cropOnly
+    this.metric = METRICS.some(([v]) => v === p.metric) ? p.metric : "pixels"
+    this.ui.metric.value = this.metric
+    this.blur = clamp(Math.round(Number(p.blur) || 0), 0, 4)
+    this.ui.blur.value = this.blur
     this.cropOn = !!p.cropOn
     this.aspect = Number(p.aspect) || 0
     this.ui.matchFrames.value = this.matchFrames
@@ -445,6 +461,43 @@ class TrimPanel {
       title:
         "Search only the frames between start_frame and end_frame, and fingerprint only those. Memory then depends on the range length instead of the file, so the fine grids (256 and up) become affordable: pick the rough range first, then search within it.",
     }, [ui.rangeOnly, el("span", { text: "range only" })])
+    ui.cropOnly = el("input", { type: "checkbox", id: `lgav-crop-${this.node.id}` })
+    ui.cropOnly.checked = true
+    ui.cropOnly.addEventListener("change", () => {
+      this.cropOnly = ui.cropOnly.checked
+      this.saveNow()
+    })
+    ui.cropOnlyLabel = el("label", {
+      for: ui.cropOnly.id,
+      class: "lgav-muted",
+      style: { display: "inline-flex", alignItems: "center", gap: "3px", cursor: "pointer" },
+      title:
+        "Compare only what is inside the crop box (when one is set). The subject then fills the whole grid instead of sharing it with the background, so the same grid resolves finer movement. Does nothing without a crop.",
+    }, [ui.cropOnly, el("span", { text: "crop only" })])
+    ui.metric = el("select", {
+      title:
+        "pixels: plain average difference over the grid — the background dominates when the subject is small.\nmotion-weighted: every cell is weighted by how much it changes across the searched frames, so still background counts for nothing and the moving subject carries the comparison. Scores run lower than with pixels; lower the similarity threshold to match.",
+    })
+    for (const [v, label] of METRICS) ui.metric.appendChild(el("option", { value: v, text: label }))
+    ui.metric.addEventListener("change", () => {
+      this.metric = ui.metric.value
+      this.saveNow()
+    })
+    ui.blur = el("input", {
+      type: "number",
+      min: "0",
+      max: "4",
+      step: "1",
+      value: "0",
+      class: "lgav-small",
+      title: "Box blur, in grid cells, applied to the fingerprints before comparing. 1–2 takes the edge off codec noise and grain on fine grids; 0 is off.",
+    })
+    ui.blur.addEventListener("keydown", (e) => e.stopPropagation())
+    ui.blur.addEventListener("change", () => {
+      this.blur = clamp(Math.round(Number(ui.blur.value) || 0), 0, 4)
+      ui.blur.value = this.blur
+      this.saveNow()
+    })
     ui.search = el("button", { text: "Find similar", title: "List frames that look like the frame under the playhead", onclick: () => this.search() })
     ui.status = el("span", { class: "lgav-grow lgav-muted", text: "" })
     root.appendChild(
@@ -456,7 +509,16 @@ class TrimPanel {
         ui.similarity,
         el("span", { class: "lgav-muted", text: "grid" }),
         ui.fingerprint,
+        el("span", { class: "lgav-muted", text: "metric" }),
+        ui.metric,
+        el("span", { class: "lgav-muted", text: "blur" }),
+        ui.blur,
+      ])
+    )
+    root.appendChild(
+      el("div", { class: "lgav-row" }, [
         ui.rangeOnlyLabel,
+        ui.cropOnlyLabel,
         ui.search,
         ui.status,
       ])
@@ -1020,13 +1082,23 @@ class TrimPanel {
       this.ui.search.disabled = false
       return
     }
+    const crop = this.cropRect()
+    const cropKey = this.cropOnly && crop.active ? `${crop.x},${crop.y},${crop.w},${crop.h}` : ""
     const last = this.results
-    const reindex = !last || fp !== last.fingerprint_size || rangeOnly !== (last.start > 0 || last.end < this.frames) || (rangeOnly && (last.start !== rs || last.end !== re))
-    const where = rangeOnly ? ` within #${rs}–#${re - 1}` : ""
-    this.setStatus(`Searching for frames like #${query} on a ${fp}×${fp} grid${where}${reindex ? " (reading the frames for this grid first)" : ""}…`)
+    const lastCrop = last?.crop ? last.crop.join(",") : ""
+    const reindex =
+      !last ||
+      fp !== last.fingerprint_size ||
+      cropKey !== lastCrop ||
+      rangeOnly !== (last.start > 0 || last.end < this.frames) ||
+      (rangeOnly && (last.start !== rs || last.end !== re))
+    const where = (rangeOnly ? ` within #${rs}–#${re - 1}` : "") + (cropKey ? ", crop only" : "")
+    const how = (this.metric === "motion" ? ", motion-weighted" : "") + (this.blur > 0 ? `, blur ${this.blur}` : "")
+    this.setStatus(`Searching for frames like #${query} on a ${fp}×${fp} grid${where}${how}${reindex ? " (reading the frames for this grid first)" : ""}…`)
     try {
       const range = rangeOnly ? `&start=${rs}&end=${re}` : ""
-      const url = `${ROUTE}/search?file=${encodeURIComponent(name)}&frame=${query}&match_frames=${this.matchFrames}&similarity=${this.similarity}&fingerprint=${fp}${range}`
+      const cropParam = cropKey ? `&crop=${cropKey}` : ""
+      const url = `${ROUTE}/search?file=${encodeURIComponent(name)}&frame=${query}&match_frames=${this.matchFrames}&similarity=${this.similarity}&fingerprint=${fp}${range}${cropParam}&metric=${this.metric}&blur=${this.blur}`
       const resp = await api.fetchApi(url)
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error || resp.statusText)
@@ -1057,7 +1129,12 @@ class TrimPanel {
     const n = r.matches.length
     const note = r.truncated ? ` — showing the best ${n} of ${r.total}; raise the similarity` : ""
     const ranged = r.start != null && (r.start > 0 || r.end < this.frames)
-    const grid = (r.fingerprint_size ? ` on ${r.fingerprint_size}×${r.fingerprint_size}` : "") + (ranged ? ` within #${r.start}–#${r.end - 1}` : "")
+    const grid =
+      (r.fingerprint_size ? ` on ${r.fingerprint_size}×${r.fingerprint_size}` : "") +
+      (ranged ? ` within #${r.start}–#${r.end - 1}` : "") +
+      (r.crop ? ", crop only" : "") +
+      (r.metric === "motion" ? ", motion-weighted" : "") +
+      (r.blur > 0 ? `, blur ${r.blur}` : "")
     this.setStatus(`#${r.query}: ${n} match${n === 1 ? "" : "es"} at ≥ ${r.threshold}%${grid}${r.match_frames > 1 ? ` over ${r.match_frames} frames` : ""}${note}`)
     const denom = Math.max(1, this.frames - 1)
     ui.markers.appendChild(el("div", { class: "lgav-marker lgav-query", style: { left: `${(r.query / denom) * 100}%` } }))

@@ -363,19 +363,38 @@ def _register_routes():
             )
             start = int(request.query.get("start", "0"))
             end = int(request.query.get("end", "0"))
-            # A size (or range) not indexed yet re-reads the frames; the panel
-            # says so. With a range, only those frames are fingerprinted, which
-            # is what makes the large grids affordable.
+            metric = request.query.get("metric", "pixels")
+            blur = int(request.query.get("blur", "0"))
+            crop = request.query.get("crop")
+            if crop:
+                crop = tuple(int(v) for v in crop.split(","))
+                if len(crop) != 4:
+                    raise ValueError("crop must be x,y,w,h")
+            # A size (or range, or crop) not indexed yet re-reads the frames;
+            # the panel says so. With a range, only those frames are
+            # fingerprinted, which is what makes the large grids affordable.
             if start > 0 or end > 0:
                 fingerprints = await run(
-                    video_source.get_range_fingerprints, path, start, end, fingerprint
+                    video_source.get_range_fingerprints,
+                    path,
+                    start,
+                    end,
+                    fingerprint,
+                    crop or None,
                 )
             else:
                 fingerprints = await run(
-                    video_source.get_index, path, None, fingerprint
+                    video_source.get_index, path, None, fingerprint, crop or None
                 )
             result = await run(
-                video_source.find_similar, fingerprints, frame, match_frames, similarity
+                video_source.find_similar,
+                fingerprints,
+                frame,
+                match_frames,
+                similarity,
+                video_source.MAX_MATCHES,
+                metric,
+                blur,
             )
         except (ValueError, OSError) as exc:
             return bad_request(str(exc))

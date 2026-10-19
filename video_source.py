@@ -19,6 +19,7 @@ import av
 import numpy as np
 import torch
 from av.error import FFmpegError, InvalidDataError
+from PIL import Image
 
 # Fingerprints are the frame area-averaged down to a square, RGB, 8-bit. The
 # averaging is what makes the comparison tolerant of codec noise and banding,
@@ -30,6 +31,13 @@ from av.error import FFmpegError, InvalidDataError
 FINGERPRINT_SIZE = 32
 FINGERPRINT_SIZES = (16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 640)
 MAX_FINGERPRINT_SIZE = 640
+
+# Similarity metrics. `pixels` is the plain mean absolute difference; `motion`
+# weights every cell by how much it varies across the searched frames, so a
+# small moving subject on a still background is what gets compared instead of
+# the background. Both can be preceded by a box blur of `blur` cells.
+METRICS = ("pixels", "motion")
+MAX_BLUR = 4
 
 # Hard ceiling on one fingerprint set. 640x640 is 1.2 MB per frame, which is
 # only sane over a short range; past this the build refuses with advice rather
@@ -78,10 +86,11 @@ class VideoIndex:
     pts: np.ndarray  # int64 [N]; -1 where the decoder gave no timestamp
     fingerprints: np.ndarray  # uint8 [N, fingerprint_size * fingerprint_size * 3]
     fingerprint_size: int = FINGERPRINT_SIZE
+    crop: tuple | None = None  # (x, y, w, h) the fingerprints were cut to, if any
 
     def fingerprint_set(self):
         return FingerprintSet(
-            0, self.frame_count, self.fingerprint_size, self.fingerprints
+            0, self.frame_count, self.fingerprint_size, self.fingerprints, self.crop
         )
 
     @property
@@ -122,6 +131,7 @@ class FingerprintSet:
     fingerprints: (
         np.ndarray
     )  # uint8 [end - start, fingerprint_size * fingerprint_size * 3]
+    crop: tuple | None = None
 
     @property
     def count(self):
@@ -202,19 +212,45 @@ def _check_fingerprint_budget(count, size, what):
         )
 
 
-def _fingerprint(frame, size):
-    return (
-        frame.reformat(width=size, height=size, format="rgb24", interpolation="AREA")
-        .to_ndarray()
-        .reshape(-1)
+def _fingerprint(frame, size, rotation=0, crop=None):
+    """One frame's fingerprint: the (cropped) picture area-averaged to `size`².
+
+    Without a crop swscale does the averaging straight from the decoded frame.
+    With one, the frame is converted and rotated first so the crop box means
+    what the panel showed, then Pillow's BOX filter averages the cut.
+    """
+    if crop is None:
+        return (
+            frame.reformat(
+                width=size, height=size, format="rgb24", interpolation="AREA"
+            )
+            .to_ndarray()
+            .reshape(-1)
+        )
+    x, y, w, h = crop
+    rgb = _to_rgb(frame, rotation)[y : y + h, x : x + w]
+    small = Image.fromarray(np.ascontiguousarray(rgb)).resize(
+        (size, size), Image.Resampling.BOX
     )
+    return np.asarray(small, dtype=np.uint8).reshape(-1)
 
 
-def build_index(path, progress=None, fingerprint_size=FINGERPRINT_SIZE):
+def normalize_crop(width, height, crop):
+    """A crop as the fingerprint builders key it: None when absent or the full frame."""
+    if crop is None:
+        return None
+    x, y, w, h = resolve_crop(width, height, *crop)
+    if (x, y, w, h) == (0, 0, width, height):
+        return None
+    return (x, y, w, h)
+
+
+def build_index(path, progress=None, fingerprint_size=FINGERPRINT_SIZE, crop=None):
     """Decode the whole file once, recording each frame's pts and fingerprint.
 
     `progress(done, total)` is called per frame; `total` is the container's own
     frame count claim, which may be 0 when the format does not record one.
+    `crop`, if given, must already be normalized against the display size.
     """
     fingerprint_size = normalize_fingerprint_size(fingerprint_size)
     pts = []
@@ -235,7 +271,7 @@ def build_index(path, progress=None, fingerprint_size=FINGERPRINT_SIZE):
             if rotation is None:
                 rotation = _rotation_quadrant(frame)
             pts.append(-1 if frame.pts is None else int(frame.pts))
-            fingerprints.append(_fingerprint(frame, fingerprint_size))
+            fingerprints.append(_fingerprint(frame, fingerprint_size, rotation, crop))
             if not total and len(pts) % 256 == 0:
                 _check_fingerprint_budget(len(pts), fingerprint_size, "the whole file")
             if progress is not None:
@@ -269,13 +305,19 @@ def build_index(path, progress=None, fingerprint_size=FINGERPRINT_SIZE):
         pts=pts,
         fingerprints=np.stack(fingerprints).astype(np.uint8),
         fingerprint_size=fingerprint_size,
+        crop=crop,
     )
 
 
+# Cache keys: a whole-file index is (path, mtime, size, grid, crop); a range set
+# is (path, mtime, size, grid, crop, start, end). `crop` is None or (x, y, w, h).
+_INDEX_KEY_LEN = 5
+
+
 def _any_cached(file_key):
-    """Any cached whole-file index of this file, whatever its fingerprint size. Caller holds the guard."""
+    """Any cached whole-file index of this file, whatever its grid or crop. Caller holds the guard."""
     for key in reversed(_cache):
-        if len(key) == 4 and key[:3] == file_key:
+        if len(key) == _INDEX_KEY_LEN and key[:3] == file_key:
             return _cache[key]
     return None
 
@@ -292,14 +334,14 @@ def _trim_cache(keep):
         _cache.popitem(last=False)
 
 
-def get_index(path, progress=None, fingerprint_size=None):
+def get_index(path, progress=None, fingerprint_size=None, crop=None):
     """The cached index for `path`, building it on first use.
 
     `fingerprint_size=None` means "any size": the frame-exact paths (thumbnails,
     the node) only need the pts, so they take whatever is cached and build at
-    the default otherwise. The search asks for a specific size and gets a fresh
-    decode when that size is not cached yet — that is the "re-index" the panel
-    offers for motion too fine for the default grid.
+    the default otherwise. The search asks for a specific size (and crop) and
+    gets a fresh decode when that combination is not cached yet — that is the
+    "re-index" the panel offers for motion too fine for the default grid.
 
     Concurrent requests for the same file (the UI asks for info and a thumbnail
     at once) share one build instead of decoding the file twice.
@@ -309,11 +351,16 @@ def get_index(path, progress=None, fingerprint_size=None):
         if fingerprint_size is None:
             index = _any_cached(file_key)
             if index is not None:
-                _cache.move_to_end((*file_key, index.fingerprint_size))
+                _cache.move_to_end((*file_key, index.fingerprint_size, index.crop))
                 return index
             fingerprint_size = FINGERPRINT_SIZE
-        fingerprint_size = normalize_fingerprint_size(fingerprint_size)
-        key = (*file_key, fingerprint_size)
+            crop = None
+    if crop is not None:
+        base = get_index(path)  # the display size the crop is measured against
+        crop = normalize_crop(base.width, base.height, crop)
+    fingerprint_size = normalize_fingerprint_size(fingerprint_size)
+    key = (*file_key, fingerprint_size, crop)
+    with _cache_guard:
         index = _cache.get(key)
         if index is not None:
             _cache.move_to_end(key)
@@ -324,7 +371,7 @@ def get_index(path, progress=None, fingerprint_size=None):
         with _cache_guard:
             index = _cache.get(key)
         if index is None:
-            index = build_index(path, progress, fingerprint_size)
+            index = build_index(path, progress, fingerprint_size, crop)
             with _cache_guard:
                 _cache[key] = index
                 _cache.move_to_end(key)
@@ -333,9 +380,10 @@ def get_index(path, progress=None, fingerprint_size=None):
     return index
 
 
-def build_range_fingerprints(path, index, start, end, fingerprint_size):
+def build_range_fingerprints(path, index, start, end, fingerprint_size, crop=None):
     """Fingerprint only frames `start <= i < end`, seeking there through `index`."""
     fingerprint_size = normalize_fingerprint_size(fingerprint_size)
+    crop = normalize_crop(index.width, index.height, crop)
     if not 0 <= start < end <= index.frame_count:
         raise ValueError(
             f"Frame range {start}..{end} is not within 0..{index.frame_count}"
@@ -349,29 +397,32 @@ def build_range_fingerprints(path, index, start, end, fingerprint_size):
         for i, frame in _frames_from(container, stream, index, start):
             if i >= end:
                 break
-            rows.append(_fingerprint(frame, fingerprint_size))
+            rows.append(_fingerprint(frame, fingerprint_size, index.rotation, crop))
     if len(rows) != end - start:
         raise ValueError(
             f"Decoded {len(rows)} of the {end - start} frames in {start}..{end} of '{path}'"
         )
-    return FingerprintSet(start, end, fingerprint_size, np.stack(rows).astype(np.uint8))
+    return FingerprintSet(
+        start, end, fingerprint_size, np.stack(rows).astype(np.uint8), crop
+    )
 
 
-def get_range_fingerprints(path, start, end, fingerprint_size):
+def get_range_fingerprints(path, start, end, fingerprint_size, crop=None):
     """Cached `FingerprintSet` over `[start, end)` at `fingerprint_size`, built on first use.
 
     Shares the cache (and its byte budget) with the whole-file indexes; the key
-    carries the range, so a different range is a different build.
+    carries the range and crop, so a different range is a different build.
     """
     index = get_index(path)  # any grid: only the pts are needed for seeking
     start = max(0, int(start))
     end = index.frame_count if int(end) <= 0 else min(int(end), index.frame_count)
     fingerprint_size = normalize_fingerprint_size(fingerprint_size)
+    crop = normalize_crop(index.width, index.height, crop)
     if (start, end) == (0, index.frame_count):
-        whole = cached_index(path, fingerprint_size)
+        whole = cached_index(path, fingerprint_size, crop)
         if whole is not None:
             return whole.fingerprint_set()
-    key = (*_file_key(path), fingerprint_size, start, end)
+    key = (*_file_key(path), fingerprint_size, crop, start, end)
     with _cache_guard:
         cached = _cache.get(key)
         if cached is not None:
@@ -382,7 +433,9 @@ def get_range_fingerprints(path, start, end, fingerprint_size):
         with _cache_guard:
             cached = _cache.get(key)
         if cached is None:
-            cached = build_range_fingerprints(path, index, start, end, fingerprint_size)
+            cached = build_range_fingerprints(
+                path, index, start, end, fingerprint_size, crop
+            )
             with _cache_guard:
                 _cache[key] = cached
                 _cache.move_to_end(key)
@@ -391,8 +444,8 @@ def get_range_fingerprints(path, start, end, fingerprint_size):
     return cached
 
 
-def cached_index(path, fingerprint_size=None):
-    """The index if it is already built (at `fingerprint_size`, or any size), else None. Never decodes."""
+def cached_index(path, fingerprint_size=None, crop=None):
+    """The index if it is already built (at `fingerprint_size` and `crop`, or any), else None. Never decodes."""
     try:
         file_key = _file_key(path)
     except OSError:
@@ -400,35 +453,105 @@ def cached_index(path, fingerprint_size=None):
     with _cache_guard:
         if fingerprint_size is None:
             return _any_cached(file_key)
-        return _cache.get((*file_key, normalize_fingerprint_size(fingerprint_size)))
+        return _cache.get(
+            (*file_key, normalize_fingerprint_size(fingerprint_size), crop)
+        )
 
 
 # --- loop-point search ---------------------------------------------------------
 
 
-def _similarity_rows(rows, query):
-    """Per-row similarity in percent: 100 means identical fingerprints."""
-    out = np.empty(rows.shape[0], dtype=np.float32)
-    query = query.astype(np.int16)
-    # Chunk by bytes, not rows: at 128x128 a row is 49 KB and 4096 rows of
-    # int16 would be a 400 MB temporary.
-    step = max(64, (8 << 20) // max(1, rows.shape[1] * 2))
+def _chunk_rows(rows):
+    """Row-chunk size that keeps an int16/float32 temporary near 8 MB."""
+    return max(16, (8 << 20) // max(1, rows.shape[1] * 4))
+
+
+def _box_blur(block, size, radius):
+    """Box-blur a chunk of fingerprints in place on their size×size grid (float32)."""
+    if radius <= 0:
+        return block
+    n = block.shape[0]
+    grid = block.reshape(n, size, size, 3)
+    for axis in (1, 2):
+        pad = [(0, 0)] * 4
+        pad[axis] = (radius, radius)
+        padded = np.pad(grid, pad, mode="edge")
+        cs = np.cumsum(padded, axis=axis, dtype=np.float32)
+        cs = np.concatenate([np.zeros_like(np.take(cs, [0], axis=axis)), cs], axis=axis)
+        width = 2 * radius + 1
+        hi = np.take(cs, range(width, width + size), axis=axis)
+        lo = np.take(cs, range(0, size), axis=axis)
+        grid[...] = (hi - lo) / width
+    return block
+
+
+def _prepared_chunks(rows, size, blur):
+    """Yield (offset, float32 chunk) of `rows`, blurred if asked, never all at once."""
+    step = _chunk_rows(rows)
     for start in range(0, rows.shape[0], step):
-        block = rows[start : start + step].astype(np.int16)
+        block = rows[start : start + step].astype(np.float32)
+        yield start, _box_blur(block, size, blur)
+
+
+def _prepared_row(rows, i, size, blur):
+    return _box_blur(rows[i : i + 1].astype(np.float32), size, blur)[0]
+
+
+def motion_weights(rows, size, blur=0):
+    """Per-cell weights from how much each cell varies over the set, mean 1.
+
+    The temporal standard deviation of every cell (and channel) is the weight,
+    so cells the picture never changes in count for nothing and a small moving
+    subject carries the comparison. A set with no motion at all falls back to
+    uniform weights rather than dividing by zero.
+    """
+    n = rows.shape[0]
+    total = np.zeros(rows.shape[1], dtype=np.float64)
+    total_sq = np.zeros(rows.shape[1], dtype=np.float64)
+    for _, block in _prepared_chunks(rows, size, blur):
+        total += block.sum(axis=0, dtype=np.float64)
+        total_sq += np.square(block, dtype=np.float64).sum(axis=0)
+    mean = total / n
+    std = np.sqrt(np.maximum(total_sq / n - mean * mean, 0.0))
+    avg = float(std.mean())
+    if avg <= 1e-6:
+        return np.ones(rows.shape[1], dtype=np.float32)
+    return (std / avg).astype(np.float32)
+
+
+def _similarity_rows(rows, query, size, blur=0, weights=None):
+    """Per-row similarity in percent: 100 means identical fingerprints.
+
+    `query` is a prepared (float32, blurred) row; `weights`, when given, have
+    mean 1 so a weighted mean absolute difference stays on the 0..255 scale.
+    """
+    out = np.empty(rows.shape[0], dtype=np.float32)
+    for start, block in _prepared_chunks(rows, size, blur):
         block -= query
         np.abs(block, out=block)
-        out[start : start + step] = block.mean(axis=1, dtype=np.float32)
+        if weights is not None:
+            block *= weights
+        out[start : start + block.shape[0]] = block.mean(axis=1, dtype=np.float32)
     return 100.0 * (1.0 - out / 255.0)
 
 
 def find_similar(
-    fingerprint_set, frame, match_frames=1, threshold=98.0, limit=MAX_MATCHES
+    fingerprint_set,
+    frame,
+    match_frames=1,
+    threshold=98.0,
+    limit=MAX_MATCHES,
+    metric="pixels",
+    blur=0,
 ):
     """Frames whose fingerprint (and the next `match_frames - 1`) match `frame`'s.
 
     `fingerprint_set` is a `FingerprintSet` (or a `VideoIndex`, taken whole);
     frame numbers in and out are absolute, and the search never leaves the
-    set's range. A match is scored by the *worst* of its `match_frames` pairs,
+    set's range. `metric` is `pixels` (plain mean absolute difference) or
+    `motion` (cells weighted by how much they vary over the set); `blur` box-
+    blurs the fingerprints by that many cells first, against codec noise.
+    A match is scored by the *worst* of its `match_frames` pairs,
     so every frame of the window has to clear the threshold. Consecutive
     matching frames are collapsed into one candidate (the best of the run)
     because a slow scene matches itself for dozens of frames and would
@@ -454,11 +577,20 @@ def find_similar(
     match_frames = max(1, min(int(match_frames), count - frame))
     windows = count - match_frames + 1
     fingerprints = fingerprint_set.fingerprints
+    size = fingerprint_set.fingerprint_size
+    if metric not in METRICS:
+        raise ValueError(f"metric must be one of {METRICS}, not {metric!r}")
+    blur = max(0, min(int(blur), MAX_BLUR))
+    weights = motion_weights(fingerprints, size, blur) if metric == "motion" else None
 
     score = np.full(windows, 100.0, dtype=np.float32)
     for k in range(match_frames):
         similarity = _similarity_rows(
-            fingerprints[k : k + windows], fingerprints[frame + k]
+            fingerprints[k : k + windows],
+            _prepared_row(fingerprints, frame + k, size, blur),
+            size,
+            blur,
+            weights,
         )
         np.minimum(score, similarity, out=score)
 
@@ -498,6 +630,9 @@ def find_similar(
         "end": int(fingerprint_set.end),
         "match_frames": match_frames,
         "fingerprint_size": int(fingerprint_set.fingerprint_size),
+        "crop": list(fingerprint_set.crop) if fingerprint_set.crop else None,
+        "metric": metric,
+        "blur": blur,
         "threshold": float(threshold),
         "total": total,
         "truncated": truncated,
