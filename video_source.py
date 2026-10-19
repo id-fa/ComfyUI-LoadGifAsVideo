@@ -48,6 +48,10 @@ _MAX_FINGERPRINT_BYTES = 1536 << 20
 # capped so the UI never has to render that.
 MAX_MATCHES = 100
 
+# Best-scoring frames *below* the threshold, reported so the user can see where
+# the scores sit instead of guessing which way to move the threshold.
+NEAR_MISSES = 5
+
 # How much fingerprint memory to keep across indexed files (each size of each
 # file is its own entry). Evicted least-recently-used; the one being used
 # always stays.
@@ -619,6 +623,22 @@ def find_similar(
                 }
             )
 
+    # Near misses: local peaks of the score that fall short of the threshold,
+    # outside the query's own run. They are the "almost" candidates the user
+    # would otherwise only find by lowering the threshold blindly.
+    near = []
+    if windows > 0:
+        left = np.concatenate(([-np.inf], score[:-1]))
+        right = np.concatenate((score[1:], [-np.inf]))
+        peaks = np.flatnonzero((score >= left) & (score >= right) & ~matched)
+        qs, qe = query_run
+        peaks = [int(p) for p in peaks if not (qs <= p <= qe)]
+        peaks.sort(key=lambda p: (-float(score[p]), p))
+        near = [
+            {"frame": p + offset, "score": round(float(score[p]), 2)}
+            for p in peaks[:NEAR_MISSES]
+        ]
+
     matches.sort(key=lambda m: (-m["score"], m["frame"]))
     truncated = len(matches) > limit
     matches = sorted(matches[:limit], key=lambda m: m["frame"])
@@ -637,6 +657,7 @@ def find_similar(
         "total": total,
         "truncated": truncated,
         "matches": matches,
+        "near": near,
     }
 
 

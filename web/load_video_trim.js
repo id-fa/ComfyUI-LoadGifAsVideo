@@ -101,6 +101,8 @@ const STYLE = `
 .lgav-res:hover { background:#222; }
 .lgav-res.lgav-sel { background:${ACCENT}33; }
 .lgav-res.lgav-qrow { border-left:3px solid #fff; padding-left:3px; margin-bottom:2px; }
+.lgav-res.lgav-nrow { opacity:.55; }
+.lgav-marker.lgav-near { opacity:.35; }
 .lgav-res.lgav-qrow .lgav-accent { color:#fff; }
 .lgav-res .lgav-grow { flex:1; }
 .lgav-res button { padding:0 5px; line-height:15px; }
@@ -425,7 +427,7 @@ class TrimPanel {
       type: "number",
       min: "0",
       max: "100",
-      step: "0.1",
+      step: "0.01",
       value: "98",
       title: "Similarity threshold in percent. 100 is identical; a re-encode of the same frame scores about 99.5, neighbouring frames of slow motion about 98–99.",
     })
@@ -1177,7 +1179,7 @@ class TrimPanel {
     for (const m of r.matches) {
       ui.markers.appendChild(el("div", { class: "lgav-marker", style: { left: `${(m.frame / denom) * 100}%` } }))
       const run = m.run_end > m.run_start ? ` (${m.run_start}–${m.run_end})` : ""
-      addRow(m.frame, run, `${m.score.toFixed(1)}%`, "")
+      addRow(m.frame, run, `${m.score.toFixed(2)}%`, "")
     }
     if (n === 0) {
       // A threshold low enough that the matches never break is not "no match":
@@ -1190,6 +1192,12 @@ class TrimPanel {
             ? `No other frame reaches the threshold. Frames ${qs}–${qe} around #${r.query} all match and count as the query itself; if a repeat you expect lies inside that run, raise the similarity.`
             : "No other frame reaches the threshold."
       ui.results.appendChild(el("div", { class: "lgav-muted", style: { padding: "2px 4px", whiteSpace: "normal" }, text }))
+    }
+    // Near misses: the best frames that fell short, dimmed, so the threshold
+    // can be set from what the scores actually are.
+    for (const m of r.near ?? []) {
+      ui.markers.appendChild(el("div", { class: "lgav-marker lgav-near", style: { left: `${(m.frame / denom) * 100}%` } }))
+      addRow(m.frame, " near miss", `${m.score.toFixed(2)}%`, " lgav-nrow")
     }
   }
 
