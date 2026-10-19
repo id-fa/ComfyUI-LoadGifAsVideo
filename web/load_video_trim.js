@@ -29,6 +29,8 @@ const MIN_WIDTH = 560
 const PANEL_MIN_HEIGHT = 470
 const THUMB_SIZE = 256
 const PREVIEW_SIZE = 768
+const FINGERPRINT_SIZES = [16, 32, 48, 64, 96, 128]
+const FINGERPRINT_DEFAULT = 32
 const HANDLE_GRAB = 8 // px either side of a range handle that grabs it
 
 const ASPECTS = [
@@ -157,6 +159,7 @@ class TrimPanel {
     this.selected = null
     this.matchFrames = 1
     this.similarity = 98
+    this.fingerprint = FINGERPRINT_DEFAULT
     this.busy = false
     this.configuring = false
     this.loadedFile = null
@@ -244,6 +247,7 @@ class TrimPanel {
       results: this.results,
       matchFrames: this.matchFrames,
       similarity: this.similarity,
+      fingerprint: this.fingerprint,
       cropOn: this.cropOn,
       aspect: this.aspect,
     }
@@ -257,6 +261,8 @@ class TrimPanel {
     this.results = p.results && Array.isArray(p.results.matches) ? p.results : null
     this.matchFrames = clamp(Math.round(Number(p.matchFrames) || 1), 1, 16)
     this.similarity = clamp(Number(p.similarity) || 98, 0, 100)
+    this.fingerprint = FINGERPRINT_SIZES.includes(Number(p.fingerprint)) ? Number(p.fingerprint) : FINGERPRINT_DEFAULT
+    this.ui.fingerprint.value = String(this.fingerprint)
     this.cropOn = !!p.cropOn
     this.aspect = Number(p.aspect) || 0
     this.ui.matchFrames.value = this.matchFrames
@@ -413,6 +419,16 @@ class TrimPanel {
         this.saveNow()
       })
     }
+    ui.fingerprint = el("select", {
+      title:
+        "Fingerprint grid used to compare frames. Each frame is averaged down to this many cells per side before comparing, so motion finer than a cell is invisible at 32; raise it when a visible movement is not telling frames apart. The first search at a new size re-reads the whole file (and uses proportionally more memory).",
+    })
+    for (const s of FINGERPRINT_SIZES) ui.fingerprint.appendChild(el("option", { value: String(s), text: `${s}×${s}` }))
+    ui.fingerprint.value = String(FINGERPRINT_DEFAULT)
+    ui.fingerprint.addEventListener("change", () => {
+      this.fingerprint = Number(ui.fingerprint.value) || FINGERPRINT_DEFAULT
+      this.saveNow()
+    })
     ui.search = el("button", { text: "Find similar", title: "List frames that look like the frame under the playhead", onclick: () => this.search() })
     ui.status = el("span", { class: "lgav-grow lgav-muted", text: "" })
     root.appendChild(
@@ -422,6 +438,8 @@ class TrimPanel {
         ui.matchFrames,
         el("span", { class: "lgav-muted", text: "similarity %" }),
         ui.similarity,
+        el("span", { class: "lgav-muted", text: "grid" }),
+        ui.fingerprint,
         ui.search,
         ui.status,
       ])
@@ -975,9 +993,11 @@ class TrimPanel {
     const query = this.frame
     this.busy = true
     this.ui.search.disabled = true
-    this.setStatus(`Searching for frames like #${query}…`)
+    const fp = this.fingerprint
+    const reindex = fp !== (this.results?.fingerprint_size ?? FINGERPRINT_DEFAULT)
+    this.setStatus(`Searching for frames like #${query} on a ${fp}×${fp} grid${reindex ? " (re-reading the file for the new grid)" : ""}…`)
     try {
-      const url = `${ROUTE}/search?file=${encodeURIComponent(name)}&frame=${query}&match_frames=${this.matchFrames}&similarity=${this.similarity}`
+      const url = `${ROUTE}/search?file=${encodeURIComponent(name)}&frame=${query}&match_frames=${this.matchFrames}&similarity=${this.similarity}&fingerprint=${fp}`
       const resp = await api.fetchApi(url)
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error || resp.statusText)
@@ -1007,7 +1027,8 @@ class TrimPanel {
     }
     const n = r.matches.length
     const note = r.truncated ? ` — showing the best ${n} of ${r.total}; raise the similarity` : ""
-    this.setStatus(`#${r.query}: ${n} match${n === 1 ? "" : "es"} at ≥ ${r.threshold}%${r.match_frames > 1 ? ` over ${r.match_frames} frames` : ""}${note}`)
+    const grid = r.fingerprint_size ? ` on ${r.fingerprint_size}×${r.fingerprint_size}` : ""
+    this.setStatus(`#${r.query}: ${n} match${n === 1 ? "" : "es"} at ≥ ${r.threshold}%${grid}${r.match_frames > 1 ? ` over ${r.match_frames} frames` : ""}${note}`)
     const denom = Math.max(1, this.frames - 1)
     ui.markers.appendChild(el("div", { class: "lgav-marker lgav-query", style: { left: `${(r.query / denom) * 100}%` } }))
     // The query frame heads the list so one click brings the playhead back to

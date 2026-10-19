@@ -20,17 +20,24 @@ import numpy as np
 import torch
 from av.error import FFmpegError, InvalidDataError
 
-# Fingerprints are the frame area-averaged down to this square, RGB, 8-bit. The
-# averaging is what makes the comparison tolerant of codec noise and banding;
-# the size is a balance between discrimination and memory (3 KB per frame).
+# Fingerprints are the frame area-averaged down to a square, RGB, 8-bit. The
+# averaging is what makes the comparison tolerant of codec noise and banding,
+# and it is also what hides motion finer than one cell: a 32-cell grid cannot
+# tell two frames apart whose difference averages away inside a cell. The size
+# is therefore a per-search choice (the panel re-indexes the file at the size it
+# asks for); the default balances discrimination against memory (3 KB per frame
+# at 32, 48 KB at 128).
 FINGERPRINT_SIZE = 32
+FINGERPRINT_SIZES = (16, 32, 48, 64, 96, 128)
 
 # A low threshold on a long clip can match thousands of frames; the list is
 # capped so the UI never has to render that.
 MAX_MATCHES = 100
 
-# How many indexed files to keep. An index is roughly 3 KB per frame.
-_INDEX_CACHE_LIMIT = 4
+# How much fingerprint memory to keep across indexed files (each size of each
+# file is its own entry). Evicted least-recently-used; the one being used
+# always stays.
+_INDEX_CACHE_BYTES = 768 * 1024 * 1024
 
 # Seconds to seek short of an audio range's start; see `decode_audio`.
 _AUDIO_SEEK_MARGIN = 1.0
@@ -63,7 +70,8 @@ class VideoIndex:
     time_base: Fraction
     rotation: int  # quadrants, as `np.rot90` wants them
     pts: np.ndarray  # int64 [N]; -1 where the decoder gave no timestamp
-    fingerprints: np.ndarray  # uint8 [N, FINGERPRINT_SIZE * FINGERPRINT_SIZE * 3]
+    fingerprints: np.ndarray  # uint8 [N, fingerprint_size * fingerprint_size * 3]
+    fingerprint_size: int = FINGERPRINT_SIZE
 
     @property
     def frame_count(self):
@@ -133,17 +141,31 @@ _cache_guard = threading.Lock()
 _build_locks = {}
 
 
-def _cache_key(path):
+def _file_key(path):
     st = os.stat(path)
     return (os.path.abspath(path), st.st_mtime_ns, st.st_size)
 
 
-def build_index(path, progress=None):
+def _cache_key(path, fingerprint_size=FINGERPRINT_SIZE):
+    return (*_file_key(path), int(fingerprint_size))
+
+
+def normalize_fingerprint_size(size):
+    """Clamp a requested fingerprint size to the supported range (8..128)."""
+    try:
+        size = int(size)
+    except (TypeError, ValueError):
+        return FINGERPRINT_SIZE
+    return max(8, min(size, 128))
+
+
+def build_index(path, progress=None, fingerprint_size=FINGERPRINT_SIZE):
     """Decode the whole file once, recording each frame's pts and fingerprint.
 
     `progress(done, total)` is called per frame; `total` is the container's own
     frame count claim, which may be 0 when the format does not record one.
     """
+    fingerprint_size = normalize_fingerprint_size(fingerprint_size)
     pts = []
     fingerprints = []
     rotation = None
@@ -161,8 +183,8 @@ def build_index(path, progress=None):
                 rotation = _rotation_quadrant(frame)
             pts.append(-1 if frame.pts is None else int(frame.pts))
             small = frame.reformat(
-                width=FINGERPRINT_SIZE,
-                height=FINGERPRINT_SIZE,
+                width=fingerprint_size,
+                height=fingerprint_size,
                 format="rgb24",
                 interpolation="AREA",
             )
@@ -197,17 +219,52 @@ def build_index(path, progress=None):
         rotation=rotation,
         pts=pts,
         fingerprints=np.stack(fingerprints).astype(np.uint8),
+        fingerprint_size=fingerprint_size,
     )
 
 
-def get_index(path, progress=None):
+def _any_cached(file_key):
+    """Any cached index of this file, whatever its fingerprint size. Caller holds the guard."""
+    for key in reversed(_cache):
+        if key[:3] == file_key:
+            return _cache[key]
+    return None
+
+
+def _trim_cache(keep):
+    """Evict least-recently-used indexes until the fingerprints fit the budget."""
+    while len(_cache) > 1:
+        total = sum(i.fingerprints.nbytes for i in _cache.values())
+        if total <= _INDEX_CACHE_BYTES:
+            break
+        oldest = next(iter(_cache))
+        if oldest == keep:
+            break
+        _cache.popitem(last=False)
+
+
+def get_index(path, progress=None, fingerprint_size=None):
     """The cached index for `path`, building it on first use.
+
+    `fingerprint_size=None` means "any size": the frame-exact paths (thumbnails,
+    the node) only need the pts, so they take whatever is cached and build at
+    the default otherwise. The search asks for a specific size and gets a fresh
+    decode when that size is not cached yet — that is the "re-index" the panel
+    offers for motion too fine for the default grid.
 
     Concurrent requests for the same file (the UI asks for info and a thumbnail
     at once) share one build instead of decoding the file twice.
     """
-    key = _cache_key(path)
+    file_key = _file_key(path)
     with _cache_guard:
+        if fingerprint_size is None:
+            index = _any_cached(file_key)
+            if index is not None:
+                _cache.move_to_end((*file_key, index.fingerprint_size))
+                return index
+            fingerprint_size = FINGERPRINT_SIZE
+        fingerprint_size = normalize_fingerprint_size(fingerprint_size)
+        key = (*file_key, fingerprint_size)
         index = _cache.get(key)
         if index is not None:
             _cache.move_to_end(key)
@@ -218,24 +275,25 @@ def get_index(path, progress=None):
         with _cache_guard:
             index = _cache.get(key)
         if index is None:
-            index = build_index(path, progress)
+            index = build_index(path, progress, fingerprint_size)
             with _cache_guard:
                 _cache[key] = index
                 _cache.move_to_end(key)
-                while len(_cache) > _INDEX_CACHE_LIMIT:
-                    _cache.popitem(last=False)
+                _trim_cache(key)
                 _build_locks.pop(key, None)
     return index
 
 
-def cached_index(path):
-    """The index if it is already built, else None. Never decodes."""
+def cached_index(path, fingerprint_size=None):
+    """The index if it is already built (at `fingerprint_size`, or any size), else None. Never decodes."""
     try:
-        key = _cache_key(path)
+        file_key = _file_key(path)
     except OSError:
         return None
     with _cache_guard:
-        return _cache.get(key)
+        if fingerprint_size is None:
+            return _any_cached(file_key)
+        return _cache.get((*file_key, normalize_fingerprint_size(fingerprint_size)))
 
 
 # --- loop-point search ---------------------------------------------------------
@@ -245,7 +303,9 @@ def _similarity_rows(rows, query):
     """Per-row similarity in percent: 100 means identical fingerprints."""
     out = np.empty(rows.shape[0], dtype=np.float32)
     query = query.astype(np.int16)
-    step = 4096
+    # Chunk by bytes, not rows: at 128x128 a row is 49 KB and 4096 rows of
+    # int16 would be a 400 MB temporary.
+    step = max(64, (8 << 20) // max(1, rows.shape[1] * 2))
     for start in range(0, rows.shape[0], step):
         block = rows[start : start + step].astype(np.int16)
         block -= query
@@ -315,6 +375,7 @@ def find_similar(index, frame, match_frames=1, threshold=98.0, limit=MAX_MATCHES
         "query_run_start": query_run[0],
         "query_run_end": query_run[1],
         "match_frames": match_frames,
+        "fingerprint_size": int(index.fingerprint_size),
         "threshold": float(threshold),
         "total": total,
         "truncated": truncated,

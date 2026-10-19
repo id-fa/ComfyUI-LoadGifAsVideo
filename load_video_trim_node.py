@@ -261,6 +261,7 @@ def _resolve_file(name):
 def _info(path):
     index = video_source.get_index(path)
     return {
+        "fingerprint_sizes": list(video_source.FINGERPRINT_SIZES),
         "frames": index.frame_count,
         "fps": float(index.frame_rate),
         "fps_fraction": [index.frame_rate.numerator, index.frame_rate.denominator],
@@ -357,7 +358,11 @@ def _register_routes():
             frame = int(request.query.get("frame", "0"))
             match_frames = int(request.query.get("match_frames", "1"))
             similarity = float(request.query.get("similarity", "98"))
-            index = await run(video_source.get_index, path)
+            fingerprint = video_source.normalize_fingerprint_size(
+                request.query.get("fingerprint", video_source.FINGERPRINT_SIZE)
+            )
+            # A size not indexed yet re-reads the file; the panel says so.
+            index = await run(video_source.get_index, path, None, fingerprint)
             result = await run(
                 video_source.find_similar, index, frame, match_frames, similarity
             )
