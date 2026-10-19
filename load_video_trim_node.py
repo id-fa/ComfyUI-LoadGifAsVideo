@@ -361,10 +361,21 @@ def _register_routes():
             fingerprint = video_source.normalize_fingerprint_size(
                 request.query.get("fingerprint", video_source.FINGERPRINT_SIZE)
             )
-            # A size not indexed yet re-reads the file; the panel says so.
-            index = await run(video_source.get_index, path, None, fingerprint)
+            start = int(request.query.get("start", "0"))
+            end = int(request.query.get("end", "0"))
+            # A size (or range) not indexed yet re-reads the frames; the panel
+            # says so. With a range, only those frames are fingerprinted, which
+            # is what makes the large grids affordable.
+            if start > 0 or end > 0:
+                fingerprints = await run(
+                    video_source.get_range_fingerprints, path, start, end, fingerprint
+                )
+            else:
+                fingerprints = await run(
+                    video_source.get_index, path, None, fingerprint
+                )
             result = await run(
-                video_source.find_similar, index, frame, match_frames, similarity
+                video_source.find_similar, fingerprints, frame, match_frames, similarity
             )
         except (ValueError, OSError) as exc:
             return bad_request(str(exc))

@@ -29,7 +29,7 @@ const MIN_WIDTH = 560
 const PANEL_MIN_HEIGHT = 470
 const THUMB_SIZE = 256
 const PREVIEW_SIZE = 768
-const FINGERPRINT_SIZES = [16, 32, 48, 64, 96, 128]
+const FINGERPRINT_SIZES = [16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 640]
 const FINGERPRINT_DEFAULT = 32
 const HANDLE_GRAB = 8 // px either side of a range handle that grabs it
 
@@ -160,6 +160,7 @@ class TrimPanel {
     this.matchFrames = 1
     this.similarity = 98
     this.fingerprint = FINGERPRINT_DEFAULT
+    this.rangeOnly = false
     this.busy = false
     this.configuring = false
     this.loadedFile = null
@@ -248,6 +249,7 @@ class TrimPanel {
       matchFrames: this.matchFrames,
       similarity: this.similarity,
       fingerprint: this.fingerprint,
+      rangeOnly: this.rangeOnly,
       cropOn: this.cropOn,
       aspect: this.aspect,
     }
@@ -263,6 +265,8 @@ class TrimPanel {
     this.similarity = clamp(Number(p.similarity) || 98, 0, 100)
     this.fingerprint = FINGERPRINT_SIZES.includes(Number(p.fingerprint)) ? Number(p.fingerprint) : FINGERPRINT_DEFAULT
     this.ui.fingerprint.value = String(this.fingerprint)
+    this.rangeOnly = !!p.rangeOnly
+    this.ui.rangeOnly.checked = this.rangeOnly
     this.cropOn = !!p.cropOn
     this.aspect = Number(p.aspect) || 0
     this.ui.matchFrames.value = this.matchFrames
@@ -429,6 +433,18 @@ class TrimPanel {
       this.fingerprint = Number(ui.fingerprint.value) || FINGERPRINT_DEFAULT
       this.saveNow()
     })
+    ui.rangeOnly = el("input", { type: "checkbox", id: `lgav-range-${this.node.id}` })
+    ui.rangeOnly.addEventListener("change", () => {
+      this.rangeOnly = ui.rangeOnly.checked
+      this.saveNow()
+    })
+    ui.rangeOnlyLabel = el("label", {
+      for: ui.rangeOnly.id,
+      class: "lgav-muted",
+      style: { display: "inline-flex", alignItems: "center", gap: "3px", cursor: "pointer" },
+      title:
+        "Search only the frames between start_frame and end_frame, and fingerprint only those. Memory then depends on the range length instead of the file, so the fine grids (256 and up) become affordable: pick the rough range first, then search within it.",
+    }, [ui.rangeOnly, el("span", { text: "range only" })])
     ui.search = el("button", { text: "Find similar", title: "List frames that look like the frame under the playhead", onclick: () => this.search() })
     ui.status = el("span", { class: "lgav-grow lgav-muted", text: "" })
     root.appendChild(
@@ -440,6 +456,7 @@ class TrimPanel {
         ui.similarity,
         el("span", { class: "lgav-muted", text: "grid" }),
         ui.fingerprint,
+        ui.rangeOnlyLabel,
         ui.search,
         ui.status,
       ])
@@ -994,10 +1011,22 @@ class TrimPanel {
     this.busy = true
     this.ui.search.disabled = true
     const fp = this.fingerprint
-    const reindex = fp !== (this.results?.fingerprint_size ?? FINGERPRINT_DEFAULT)
-    this.setStatus(`Searching for frames like #${query} on a ${fp}×${fp} grid${reindex ? " (re-reading the file for the new grid)" : ""}…`)
+    const rangeOnly = this.rangeOnly
+    const rs = this.start
+    const re = this.end
+    if (rangeOnly && (query < rs || query >= re)) {
+      this.setStatus(`The playhead (#${query}) is outside the range #${rs}–#${re - 1}; move it inside, or untick "range only".`, true)
+      this.busy = false
+      this.ui.search.disabled = false
+      return
+    }
+    const last = this.results
+    const reindex = !last || fp !== last.fingerprint_size || rangeOnly !== (last.start > 0 || last.end < this.frames) || (rangeOnly && (last.start !== rs || last.end !== re))
+    const where = rangeOnly ? ` within #${rs}–#${re - 1}` : ""
+    this.setStatus(`Searching for frames like #${query} on a ${fp}×${fp} grid${where}${reindex ? " (reading the frames for this grid first)" : ""}…`)
     try {
-      const url = `${ROUTE}/search?file=${encodeURIComponent(name)}&frame=${query}&match_frames=${this.matchFrames}&similarity=${this.similarity}&fingerprint=${fp}`
+      const range = rangeOnly ? `&start=${rs}&end=${re}` : ""
+      const url = `${ROUTE}/search?file=${encodeURIComponent(name)}&frame=${query}&match_frames=${this.matchFrames}&similarity=${this.similarity}&fingerprint=${fp}${range}`
       const resp = await api.fetchApi(url)
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error || resp.statusText)
@@ -1027,7 +1056,8 @@ class TrimPanel {
     }
     const n = r.matches.length
     const note = r.truncated ? ` — showing the best ${n} of ${r.total}; raise the similarity` : ""
-    const grid = r.fingerprint_size ? ` on ${r.fingerprint_size}×${r.fingerprint_size}` : ""
+    const ranged = r.start != null && (r.start > 0 || r.end < this.frames)
+    const grid = (r.fingerprint_size ? ` on ${r.fingerprint_size}×${r.fingerprint_size}` : "") + (ranged ? ` within #${r.start}–#${r.end - 1}` : "")
     this.setStatus(`#${r.query}: ${n} match${n === 1 ? "" : "es"} at ≥ ${r.threshold}%${grid}${r.match_frames > 1 ? ` over ${r.match_frames} frames` : ""}${note}`)
     const denom = Math.max(1, this.frames - 1)
     ui.markers.appendChild(el("div", { class: "lgav-marker lgav-query", style: { left: `${(r.query / denom) * 100}%` } }))

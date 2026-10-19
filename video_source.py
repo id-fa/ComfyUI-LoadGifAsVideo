@@ -28,7 +28,13 @@ from av.error import FFmpegError, InvalidDataError
 # asks for); the default balances discrimination against memory (3 KB per frame
 # at 32, 48 KB at 128).
 FINGERPRINT_SIZE = 32
-FINGERPRINT_SIZES = (16, 32, 48, 64, 96, 128)
+FINGERPRINT_SIZES = (16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 640)
+MAX_FINGERPRINT_SIZE = 640
+
+# Hard ceiling on one fingerprint set. 640x640 is 1.2 MB per frame, which is
+# only sane over a short range; past this the build refuses with advice rather
+# than eating the machine.
+_MAX_FINGERPRINT_BYTES = 1536 << 20
 
 # A low threshold on a long clip can match thousands of frames; the list is
 # capped so the UI never has to render that.
@@ -73,6 +79,11 @@ class VideoIndex:
     fingerprints: np.ndarray  # uint8 [N, fingerprint_size * fingerprint_size * 3]
     fingerprint_size: int = FINGERPRINT_SIZE
 
+    def fingerprint_set(self):
+        return FingerprintSet(
+            0, self.frame_count, self.fingerprint_size, self.fingerprints
+        )
+
     @property
     def frame_count(self):
         return int(self.pts.shape[0])
@@ -93,6 +104,28 @@ class VideoIndex:
         if self.seekable:
             return float(self.pts[frame] * self.time_base)
         return float(frame / self.frame_rate)
+
+
+@dataclass
+class FingerprintSet:
+    """Fingerprints for frames `start <= i < end`, the unit the search runs over.
+
+    A whole-file index yields one covering every frame; `get_range_fingerprints`
+    builds one over just the trimmed range, which is what makes a very fine
+    grid affordable — the memory is per frame *fingerprinted*, not per frame in
+    the file.
+    """
+
+    start: int
+    end: int
+    fingerprint_size: int
+    fingerprints: (
+        np.ndarray
+    )  # uint8 [end - start, fingerprint_size * fingerprint_size * 3]
+
+    @property
+    def count(self):
+        return int(self.fingerprints.shape[0])
 
 
 def is_video_file(name):
@@ -151,12 +184,30 @@ def _cache_key(path, fingerprint_size=FINGERPRINT_SIZE):
 
 
 def normalize_fingerprint_size(size):
-    """Clamp a requested fingerprint size to the supported range (8..128)."""
+    """Clamp a requested fingerprint size to the supported range (8..MAX_FINGERPRINT_SIZE)."""
     try:
         size = int(size)
     except (TypeError, ValueError):
         return FINGERPRINT_SIZE
-    return max(8, min(size, 128))
+    return max(8, min(size, MAX_FINGERPRINT_SIZE))
+
+
+def _check_fingerprint_budget(count, size, what):
+    needed = count * size * size * 3
+    if needed > _MAX_FINGERPRINT_BYTES:
+        raise ValueError(
+            f"A {size}x{size} fingerprint over {count} frames ({what}) needs "
+            f"{needed >> 20} MB, more than the {_MAX_FINGERPRINT_BYTES >> 20} MB "
+            "limit. Choose a smaller grid, or search within a shorter range."
+        )
+
+
+def _fingerprint(frame, size):
+    return (
+        frame.reformat(width=size, height=size, format="rgb24", interpolation="AREA")
+        .to_ndarray()
+        .reshape(-1)
+    )
 
 
 def build_index(path, progress=None, fingerprint_size=FINGERPRINT_SIZE):
@@ -172,6 +223,8 @@ def build_index(path, progress=None, fingerprint_size=FINGERPRINT_SIZE):
     with av.open(path) as container:
         stream = _first_video_stream(container)
         total = int(stream.frames or 0)
+        if total:
+            _check_fingerprint_budget(total, fingerprint_size, "the whole file")
         time_base = (
             Fraction(stream.time_base) if stream.time_base else Fraction(1, 1000)
         )
@@ -182,13 +235,9 @@ def build_index(path, progress=None, fingerprint_size=FINGERPRINT_SIZE):
             if rotation is None:
                 rotation = _rotation_quadrant(frame)
             pts.append(-1 if frame.pts is None else int(frame.pts))
-            small = frame.reformat(
-                width=fingerprint_size,
-                height=fingerprint_size,
-                format="rgb24",
-                interpolation="AREA",
-            )
-            fingerprints.append(small.to_ndarray().reshape(-1))
+            fingerprints.append(_fingerprint(frame, fingerprint_size))
+            if not total and len(pts) % 256 == 0:
+                _check_fingerprint_budget(len(pts), fingerprint_size, "the whole file")
             if progress is not None:
                 progress(len(pts), total)
 
@@ -224,9 +273,9 @@ def build_index(path, progress=None, fingerprint_size=FINGERPRINT_SIZE):
 
 
 def _any_cached(file_key):
-    """Any cached index of this file, whatever its fingerprint size. Caller holds the guard."""
+    """Any cached whole-file index of this file, whatever its fingerprint size. Caller holds the guard."""
     for key in reversed(_cache):
-        if key[:3] == file_key:
+        if len(key) == 4 and key[:3] == file_key:
             return _cache[key]
     return None
 
@@ -284,6 +333,64 @@ def get_index(path, progress=None, fingerprint_size=None):
     return index
 
 
+def build_range_fingerprints(path, index, start, end, fingerprint_size):
+    """Fingerprint only frames `start <= i < end`, seeking there through `index`."""
+    fingerprint_size = normalize_fingerprint_size(fingerprint_size)
+    if not 0 <= start < end <= index.frame_count:
+        raise ValueError(
+            f"Frame range {start}..{end} is not within 0..{index.frame_count}"
+        )
+    _check_fingerprint_budget(
+        end - start, fingerprint_size, f"frames {start}-{end - 1}"
+    )
+    rows = []
+    with av.open(path) as container:
+        stream = _first_video_stream(container)
+        for i, frame in _frames_from(container, stream, index, start):
+            if i >= end:
+                break
+            rows.append(_fingerprint(frame, fingerprint_size))
+    if len(rows) != end - start:
+        raise ValueError(
+            f"Decoded {len(rows)} of the {end - start} frames in {start}..{end} of '{path}'"
+        )
+    return FingerprintSet(start, end, fingerprint_size, np.stack(rows).astype(np.uint8))
+
+
+def get_range_fingerprints(path, start, end, fingerprint_size):
+    """Cached `FingerprintSet` over `[start, end)` at `fingerprint_size`, built on first use.
+
+    Shares the cache (and its byte budget) with the whole-file indexes; the key
+    carries the range, so a different range is a different build.
+    """
+    index = get_index(path)  # any grid: only the pts are needed for seeking
+    start = max(0, int(start))
+    end = index.frame_count if int(end) <= 0 else min(int(end), index.frame_count)
+    fingerprint_size = normalize_fingerprint_size(fingerprint_size)
+    if (start, end) == (0, index.frame_count):
+        whole = cached_index(path, fingerprint_size)
+        if whole is not None:
+            return whole.fingerprint_set()
+    key = (*_file_key(path), fingerprint_size, start, end)
+    with _cache_guard:
+        cached = _cache.get(key)
+        if cached is not None:
+            _cache.move_to_end(key)
+            return cached
+        lock = _build_locks.setdefault(key, threading.Lock())
+    with lock:
+        with _cache_guard:
+            cached = _cache.get(key)
+        if cached is None:
+            cached = build_range_fingerprints(path, index, start, end, fingerprint_size)
+            with _cache_guard:
+                _cache[key] = cached
+                _cache.move_to_end(key)
+                _trim_cache(key)
+                _build_locks.pop(key, None)
+    return cached
+
+
 def cached_index(path, fingerprint_size=None):
     """The index if it is already built (at `fingerprint_size`, or any size), else None. Never decodes."""
     try:
@@ -314,26 +421,39 @@ def _similarity_rows(rows, query):
     return 100.0 * (1.0 - out / 255.0)
 
 
-def find_similar(index, frame, match_frames=1, threshold=98.0, limit=MAX_MATCHES):
+def find_similar(
+    fingerprint_set, frame, match_frames=1, threshold=98.0, limit=MAX_MATCHES
+):
     """Frames whose fingerprint (and the next `match_frames - 1`) match `frame`'s.
 
-    A match is scored by the *worst* of its `match_frames` pairs, so every frame
-    of the window has to clear the threshold. Consecutive matching frames are
-    collapsed into one candidate (the best of the run) because a slow scene
-    matches itself for dozens of frames and would otherwise drown the list; the
-    run that contains the query frame is dropped for the same reason. The
-    result is capped at `limit` by score, then listed in frame order.
+    `fingerprint_set` is a `FingerprintSet` (or a `VideoIndex`, taken whole);
+    frame numbers in and out are absolute, and the search never leaves the
+    set's range. A match is scored by the *worst* of its `match_frames` pairs,
+    so every frame of the window has to clear the threshold. Consecutive
+    matching frames are collapsed into one candidate (the best of the run)
+    because a slow scene matches itself for dozens of frames and would
+    otherwise drown the list; the run that contains the query frame is dropped
+    for the same reason. The result is capped at `limit` by score, then listed
+    in frame order.
     """
-    count = index.frame_count
+    if isinstance(fingerprint_set, VideoIndex):
+        fingerprint_set = fingerprint_set.fingerprint_set()
+    offset = fingerprint_set.start
+    count = fingerprint_set.count
     if count == 0:
         raise ValueError("The video has no frames")
-    frame = int(frame)
+    absolute = int(frame)
+    frame = absolute - offset
     if frame < 0 or frame >= count:
-        raise ValueError(f"frame {frame} is outside 0..{count - 1}")
+        raise ValueError(
+            f"frame {absolute} is outside the searched range "
+            f"{offset}..{fingerprint_set.end - 1}; move the playhead inside the "
+            "range or search the whole file"
+        )
 
     match_frames = max(1, min(int(match_frames), count - frame))
     windows = count - match_frames + 1
-    fingerprints = index.fingerprints
+    fingerprints = fingerprint_set.fingerprints
 
     score = np.full(windows, 100.0, dtype=np.float32)
     for k in range(match_frames):
@@ -360,10 +480,10 @@ def find_similar(index, frame, match_frames=1, threshold=98.0, limit=MAX_MATCHES
             best = run_start + int(np.argmax(score[run_start:run_end]))
             matches.append(
                 {
-                    "frame": int(best),
+                    "frame": int(best) + offset,
                     "score": round(float(score[best]), 2),
-                    "run_start": int(run_start),
-                    "run_end": int(run_end - 1),
+                    "run_start": int(run_start) + offset,
+                    "run_end": int(run_end - 1) + offset,
                 }
             )
 
@@ -371,11 +491,13 @@ def find_similar(index, frame, match_frames=1, threshold=98.0, limit=MAX_MATCHES
     truncated = len(matches) > limit
     matches = sorted(matches[:limit], key=lambda m: m["frame"])
     return {
-        "query": frame,
-        "query_run_start": query_run[0],
-        "query_run_end": query_run[1],
+        "query": absolute,
+        "query_run_start": query_run[0] + offset,
+        "query_run_end": query_run[1] + offset,
+        "start": offset,
+        "end": int(fingerprint_set.end),
         "match_frames": match_frames,
-        "fingerprint_size": int(index.fingerprint_size),
+        "fingerprint_size": int(fingerprint_set.fingerprint_size),
         "threshold": float(threshold),
         "total": total,
         "truncated": truncated,
