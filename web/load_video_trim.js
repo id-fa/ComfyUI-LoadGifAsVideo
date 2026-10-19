@@ -1043,13 +1043,26 @@ class TrimPanel {
       })
       ui.results.appendChild(row)
     }
-    addRow(r.query, " query", "", " lgav-qrow")
+    const qs = r.query_run_start ?? r.query
+    const qe = r.query_run_end ?? r.query
+    addRow(r.query, qe > qs ? ` query (${qs}–${qe})` : " query", "", " lgav-qrow")
     for (const m of r.matches) {
       ui.markers.appendChild(el("div", { class: "lgav-marker", style: { left: `${(m.frame / denom) * 100}%` } }))
       const run = m.run_end > m.run_start ? ` (${m.run_start}–${m.run_end})` : ""
       addRow(m.frame, run, `${m.score.toFixed(1)}%`, "")
     }
-    if (n === 0) ui.results.appendChild(el("div", { class: "lgav-muted", style: { padding: "2px 4px" }, text: "No other frame reaches the threshold." }))
+    if (n === 0) {
+      // A threshold low enough that the matches never break is not "no match":
+      // the query's own run has swallowed the candidates. Say so.
+      const span = qe - qs + 1
+      const text =
+        span >= this.frames
+          ? `Every frame clears ${r.threshold}%, so the whole clip is one run around #${r.query} and there is nothing to separate. Raise the similarity.`
+          : span > 1
+            ? `No other frame reaches the threshold. Frames ${qs}–${qe} around #${r.query} all match and count as the query itself; if a repeat you expect lies inside that run, raise the similarity.`
+            : "No other frame reaches the threshold."
+      ui.results.appendChild(el("div", { class: "lgav-muted", style: { padding: "2px 4px", whiteSpace: "normal" }, text }))
+    }
   }
 
   // ---- refresh -------------------------------------------------------------

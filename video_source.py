@@ -285,11 +285,16 @@ def find_similar(index, frame, match_frames=1, threshold=98.0, limit=MAX_MATCHES
     matched = score >= float(threshold)
     matches = []
     total = 0
+    # The run the query sits in is reported so the UI can say *why* a low
+    # threshold returns nothing: once every frame clears the bar, the whole
+    # clip is that one run, and it is dropped as the query's own neighbourhood.
+    query_run = (frame, frame)
     if matched.any():
         padded = np.concatenate(([False], matched, [False]))
         edges = np.flatnonzero(np.diff(padded.astype(np.int8)))
         for run_start, run_end in zip(edges[::2], edges[1::2]):
             if run_start <= frame < run_end:
+                query_run = (int(run_start), int(run_end - 1))
                 continue
             total += 1
             best = run_start + int(np.argmax(score[run_start:run_end]))
@@ -307,6 +312,8 @@ def find_similar(index, frame, match_frames=1, threshold=98.0, limit=MAX_MATCHES
     matches = sorted(matches[:limit], key=lambda m: m["frame"])
     return {
         "query": frame,
+        "query_run_start": query_run[0],
+        "query_run_end": query_run[1],
         "match_frames": match_frames,
         "threshold": float(threshold),
         "total": total,

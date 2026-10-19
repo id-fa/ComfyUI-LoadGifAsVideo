@@ -85,7 +85,7 @@ Loads a frame range of a video file as a VIDEO (with the audio of that range) an
 - `frames` — how many consecutive frames have to match (default 1). With 2 or 3, the frames *after* the hit must match the frames after the query too, so the motion continues the same way rather than coinciding for a single picture. In practice 1 is the setting: real footage never matches that long, and animation is often drawn on twos.
 - `similarity %` — the threshold. 100 is identical. Lossy encoding, noise and banding keep repeated frames from being bit-identical, so the default is 98; a re-encode of the same picture scores about 99.5, and the neighbouring frames of slow motion about 98–99. Raise it when the list is full of near-misses, lower it when a repeat you can see is missing.
 
-A still passage matches itself for dozens of frames; those are collapsed into one entry (the best of the run, with the run's extent shown), and the run the query frame itself belongs to is left out. The list stops at the best 100 hits and says so — raise the threshold rather than scrolling.
+A still passage matches itself for dozens of frames; those are collapsed into one entry (the best of the run, with the run's extent shown), and the run the query frame itself belongs to is left out (its extent is shown on the query row). That is also why a *very low* threshold finds nothing: once every frame clears the bar, the whole clip is one unbroken run around the query and there is nothing left to list — the panel says so instead of reporting "no match". The list stops at the best 100 hits and says so — raise the threshold rather than scrolling.
 
 **Frame numbers are exact.** The first time a file is opened, the server decodes it once to record every frame's timestamp and a small fingerprint; that is what the search compares and what the thumbnails, the panel and the node all seek by, so frame 340 is the same frame everywhere. The pass takes about as long as decoding the file and is kept in memory, so later searches are instant and the node reuses it when the graph runs. The preview itself is the browser's video player; if it cannot play the container (MKV, AVI…), the panel shows server-rendered frames instead and stepping still works, only playback is off.
 
@@ -429,7 +429,7 @@ The quantizers and dithering filters are clean-room implementations written from
 - `frames` — 連続して一致させるフレーム数（省略時 1）。2 や 3 にすると、ヒットしたフレームの次以降も検索元の次以降と一致する必要があるため、たまたま 1 枚だけ似た絵ではなく、動きの続きも同じであることが期待できます。ただし実写では完全一致はまずなく、アニメは 2 コマ打ちで動くこともあるので、基本は 1 です。
 - `similarity %` — しきい値。100 が完全一致です。不可逆圧縮のノイズやバンディングのため繰り返しフレームもビット単位では一致しないので、既定値は 98 です。同じ絵の再エンコードは 99.5 前後、ゆっくりした動きの隣接フレームは 98〜99 程度になります。惜しいだけのフレームばかり並ぶなら上げ、見て分かる繰り返しが出てこないなら下げてください。
 
-静止している区間は何十フレームも自分自身と一致してしまうので、連続する一致は 1 項目にまとめられ（区間内で最良のフレームを代表にし、区間の範囲も表示します）、検索元フレーム自身が属する区間は除外されます。一覧は上位 100 件で打ち切られ、その旨が表示されます。スクロールするより、しきい値を上げてください。
+静止している区間は何十フレームも自分自身と一致してしまうので、連続する一致は 1 項目にまとめられ（区間内で最良のフレームを代表にし、区間の範囲も表示します）、検索元フレーム自身が属する区間は除外されます（その範囲は検索元の行に表示されます）。しきい値を*極端に下げる*と何も見つからなくなるのも同じ理由です。全フレームがしきい値を超えると、クリップ全体が検索元を含むひと続きの区間になり、区切るものがなくなります。この場合パネルは「一致なし」ではなくその旨を表示します。一覧は上位 100 件で打ち切られ、その旨が表示されます。スクロールするより、しきい値を上げてください。
 
 **フレーム番号は正確です。** ファイルを初めて開いたとき、サーバーが一度だけ全体をデコードして各フレームのタイムスタンプと小さなフィンガープリントを記録します。検索はこれを比較し、サムネイル・パネル・ノードのすべてがこれを使ってシークするので、フレーム 340 はどこでも同じフレームです。この処理はファイルのデコードと同程度の時間がかかり、結果はメモリに保持されるため、以降の検索は一瞬で、グラフ実行時のノードも再利用します。プレビュー自体はブラウザの動画プレイヤーです。ブラウザが再生できないコンテナ（MKV、AVI など）では、代わりにサーバーが描画したフレームを表示します。コマ送りはそのまま使え、再生だけが無効になります。
 
