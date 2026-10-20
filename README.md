@@ -10,9 +10,10 @@ Three nodes for turning short looping material into a VIDEO stream of the length
 - **Loop Video** — takes any existing VIDEO (e.g. a short MP4 from the stock `Load Video`) and loops it.
 - **Load Video (Trim & Loop Assist)** — loads a frame range of an MP4 / WEBM / MKV… file, optionally cropped, from a panel that scrubs the file and finds the frames where the picture repeats, so a seamless loop can be cut before it goes into `Loop Video`.
 
-Plus one extra node for the other direction, so a GIF can come back out of the workflow as well as go in:
+Plus two extra nodes for the other direction, so an animation can come back out of the workflow as well as go in:
 
 - **Save as GIF** — writes a VIDEO or an image batch back out as an animated GIF, with a full set of color quantizers and dithering filters.
+- **Save as Animated WebP** — the same node without the palette: writes an animated WebP, lossless or lossy, with the same frame-dropping, scaling and tone controls.
 
 ## Why
 
@@ -216,6 +217,32 @@ The curve peaks around `size` 8. Below that the extra tone costs more than the c
 
 The ordered screens depend on the pixel's position alone, so they are **stable frame to frame** — the pattern does not crawl the way error diffusion does on animation. That is usually the reason to reach for one.
 
+### Save as Animated WebP
+
+Writes a VIDEO or an image batch out as an animated WebP. WebP stores full 24-bit color, so there is no palette to choose and nothing to dither; everything `Save as GIF` does *before* the palette — dropping frames to `fps`, scaling into a box, `gamma` — works the same way here, and the color block is replaced by libwebp's three knobs.
+
+| Input | Type | Description |
+| --- | --- | --- |
+| `video` | VIDEO (optional) | The video to save. Its own frame rate is used. |
+| `images` | IMAGE (optional) | Frames to save, timed by `source_fps`. Connect this **or** `video`, not both. |
+| `filename_prefix` | STRING | Prefix for the file written into the ComfyUI `output` directory. |
+| `source_fps` | FLOAT | The rate an `images` batch is meant to play at. Ignored when `video` is connected. |
+| `fps` | FLOAT | Frame rate of the WebP, up to 60. Below the source rate it **drops frames**: same running time, fewer frames, smaller file. Above it, nothing happens. |
+| `width` | INT | Output width in pixels. `0` keeps the source width, or derives it from `height`. |
+| `height` | INT | Output height in pixels. `0` keeps the source height, or derives it from `width`. |
+| `size_mode` | `pad` / `fit` | What `width` × `height` means when the source's aspect ratio differs: `pad` writes a file of exactly that size with transparent bars, `fit` writes the largest frame that fits inside it, with no bars. |
+| `resample` | see [Resample filters](#resample-filters) | Filter used when scaling. |
+| `lossless` | BOOLEAN | On (default): every pixel is stored exactly and the file decodes back to the `images` output bit for bit. Off: lossy VP8, much smaller on photographic material. |
+| `quality` | INT | Lossy: picture quality, 0–100. Lossless: compression *effort*, 0 (fast) to 100 (slow) — the pixels are exact either way. |
+| `method` | INT | How hard libwebp tries, 0 (fastest) to 6 (slowest, smallest). Changes only time and size, never the picture at a given quality. |
+| `loop_count` | INT | How many times the animation plays. `0` loops forever. |
+| `gamma` | FLOAT | Tone correction applied before encoding, 0.1–10. `1` leaves the frames alone; above it brightens the midtones, below it darkens them, black and white stay put. |
+
+| Output | Type | Description |
+| --- | --- | --- |
+| `images` | IMAGE | The file read back: under `lossless` exactly the frames that went in, under lossy what the viewer will actually see, which is the thing to compare `quality` settings on. |
+| `info` | STRING | What was written: file name, size, frame count, canvas size, frame rate, running time, mode, quality and method. Connect it to the stock **Preview as Text** node to see it. |
+
 ## Behavior
 
 The length and speed controls behave identically in `Load GIF as Video` and `Loop Video`. `Load Video (Trim & Loop Assist)` has neither — it cuts a range and leaves length and speed to `Loop Video`.
@@ -328,6 +355,20 @@ The transparent slot costs one palette entry, so a letterboxed GIF quantizes to 
 - Ordered dither plans are built on a 5-bit-per-channel source lattice, which is what makes gifsicle's plan-based approach affordable on true-color input. The snap error is at most ~4/255, far below the palette spacing any dither is working against.
 - `atkinson` uses the published kernel. gifsicle's own Atkinson adds one neighbor twice and drops the lower-left one.
 
+### Save as Animated WebP only
+
+**Lossless or lossy.** `lossless` is on by default, because an animation that has been through a workflow usually deserves to come out as it went in, and a lossless WebP is still smaller than the GIF of the same frames. Lossy WebP is a different thing: it is VP8 video coding applied frame by frame, and on photographic or rendered material it is smaller by an order of magnitude again, at the cost of the softness and ringing `quality` controls. On a 192×192 twelve-frame clip (a gradient, a soft blob and a moving hard-edged block):
+
+| | `Save as GIF` 256 colors | `Save as GIF` 64 colors | lossless | lossy 90 | lossy 80 | lossy 60 |
+| --- | --- | --- | --- | --- | --- | --- |
+| file size | 226.7 KB | 161.3 KB | 140.2 KB | 9.2 KB | 5.8 KB | 3.6 KB |
+
+**`quality` and `method` under lossless.** Both still do something, but only to the encoder's effort: `quality` 0–100 is libwebp's lossless search depth and `method` 0–6 its search breadth, and the output is exact at every setting. The returns are small and not guaranteed — on the clip above, `quality` 100 with `method` 6 took fifty times as long as the defaults and came out 4% *larger*. Leave the defaults unless a particular file is worth the wait, and read the size in `info`.
+
+**Frame durations.** WebP stores durations in milliseconds, so most frame rates land on the grid almost exactly; the same bounded rounding as the GIF node is used (12fps is 83, 84, 83, 83, 84… ms), so the running time matches the source. `fps` is capped at 60: a frame of 10 ms or less is where browsers start re-timing GIF frames to 100 ms, and staying clear of it costs nothing.
+
+**Transparent bars.** Under `pad` the letterbox bars are written as real alpha, and a file with no bars carries no alpha at all. The `images` output composites the bars onto black, the way the GIF node's does. As with GIF, the picture itself is always opaque: neither VIDEO nor IMAGE carries an alpha channel in ComfyUI.
+
 ## Installation
 
 Via ComfyUI Manager, or clone into `ComfyUI/custom_nodes/`:
@@ -359,9 +400,10 @@ The quantizers and dithering filters are clean-room implementations written from
 - **Loop Video** — 既存の VIDEO（標準の `Load Video` で読み込んだ短い MP4 など）を受け取ってループさせます。
 - **Load Video (Trim & Loop Assist)** — MP4 / WEBM / MKV などの動画ファイルから、フレーム範囲を（必要ならクロップして）読み込みます。ファイルをスクラブしながら範囲を決められるパネル付きで、絵が繰り返す位置を探す「ループアシスト」により、`Loop Video` に渡す前に継ぎ目のないループを切り出せます。
 
-おまけとして、逆方向の GIF 保存用ノードも 1 つ入っています。GIF を読み込むだけでなく、ワークフローの結果を GIF に戻すこともできます。
+おまけとして、逆方向の保存用ノードも 2 つ入っています。読み込むだけでなく、ワークフローの結果をアニメーションファイルに戻すこともできます。
 
 - **Save as GIF** — VIDEO または画像バッチをアニメーション GIF として書き出します。減色アルゴリズムとディザリングフィルタを一通り備えています。
+- **Save as Animated WebP** — 上のノードからパレット関連を取り除いたもの。アニメーション WebP を可逆または非可逆で書き出します。フレーム間引き・リサイズ・トーン補正は共通です。
 
 ## このノードの主旨
 
@@ -565,6 +607,32 @@ diversity 系の 2 つは、ディザを掛けるかどうかで選ぶ色その�
 
 順序ディザ系はピクセル座標だけで決まるため、フレーム間で模様が安定します。誤差拡散のようにアニメーションで模様が這い回りません。順序ディザを選ぶ理由は多くの場合これです。
 
+### Save as Animated WebP
+
+VIDEO または画像バッチをアニメーション WebP として書き出します。WebP は 24 ビットフルカラーを保持できるので、パレットを選ぶ必要もディザをかける必要もありません。`Save as GIF` がパレットより *前* に行うこと（`fps` へのフレーム間引き、ボックスへのリサイズ、`gamma`）はすべて同じ動作で、色まわりのウィジェットが libwebp の 3 つのつまみに置き換わっています。
+
+| 入力 | 型 | 説明 |
+| --- | --- | --- |
+| `video` | VIDEO（任意） | 保存する動画。フレームレートはこの VIDEO のものがそのまま使われます。 |
+| `images` | IMAGE（任意） | 保存するフレーム。時間は `source_fps` で決まります。`video` とどちらか一方を接続してください。 |
+| `filename_prefix` | STRING | ComfyUI の `output` ディレクトリに書き出すファイル名の接頭辞。 |
+| `source_fps` | FLOAT | `images` バッチが本来再生されるべきレート。`video` 接続時は無視されます。 |
+| `fps` | FLOAT | WebP のフレームレート、最大 60。元のレートより下げるとフレームを間引きます（再生時間はそのまま、フレーム数が減り、ファイルが小さくなる）。元より上げても何も起きません。 |
+| `width` | INT | 出力の幅（ピクセル）。`0` でソースの幅のまま、または `height` から比率で決定。 |
+| `height` | INT | 出力の高さ（ピクセル）。`0` でソースの高さのまま、または `width` から比率で決定。 |
+| `size_mode` | `pad` / `fit` | ソースとアスペクト比が違うときの `width` × `height` の意味。`pad` はそのサイズのキャンバスに収めて余白を透過にし、`fit` はそのサイズに収まる最大サイズで余白なしに書き出します。 |
+| `resample` | [リサンプルフィルタ](#リサンプルフィルタresample)参照 | 拡大縮小に使うフィルタ。 |
+| `lossless` | BOOLEAN | オン（デフォルト）: 全ピクセルをそのまま保存し、ファイルは `images` 出力とビット単位で一致します。オフ: 非可逆 VP8。写真的な素材ではずっと小さくなります。 |
+| `quality` | INT | 非可逆: 画質、0〜100。可逆: 圧縮の *手間*、0（速い）〜100（遅い）。可逆ではどの値でもピクセルは完全一致です。 |
+| `method` | INT | libwebp の探索の深さ、0（最速）〜6（最も遅く、最も小さい）。同じ quality なら絵は変わらず、時間とサイズだけが変わります。 |
+| `loop_count` | INT | アニメーションの再生回数。`0` で無限ループ。 |
+| `gamma` | FLOAT | エンコード前に掛けるトーン補正、0.1〜10。`1` で無補正、大きくすると中間調が明るく、小さくすると暗くなります（黒と白は動きません）。 |
+
+| 出力 | 型 | 説明 |
+| --- | --- | --- |
+| `images` | IMAGE | 書き出したファイルを読み戻したもの。`lossless` なら入力フレームそのもの、非可逆ならビューアで実際に見える絵です。`quality` の設定を比較するならこちらを見てください。 |
+| `info` | STRING | 書き出した内容。ファイル名、サイズ、フレーム数、キャンバスサイズ、フレームレート、再生時間、可逆/非可逆、quality、method。標準の Preview as Text ノードに繋ぐと表示できます。 |
+
 ## 動作
 
 長さと速度の制御は、`Load GIF as Video` と `Loop Video` で同じ挙動になります。`Load Video (Trim & Loop Assist)` にはどちらもありません。範囲を切り出すだけで、長さと速度は `Loop Video` に任せます。
@@ -676,6 +744,20 @@ ComfyUI_00042_.gif
 - 拡散する誤差は float の精度のまま保持します。AForge は誤差をバイトバッファに書き戻すため、両端で飽和して失われます。
 - 順序ディザの plan は 5bit/チャンネルに丸めた元色に対して構築します。gifsicle の plan 方式をフルカラー入力に対して現実的な速度で動かすための措置です。丸め誤差は最大でも約 4/255 で、ディザが相手にしているパレット間隔よりはるかに小さい値です。
 - `atkinson` は公表されているカーネルを使っています。gifsicle の Atkinson 実装は 1 つの近傍を二重に加算し、左下の近傍を落としています。
+
+### Save as Animated WebP のみ
+
+**可逆か非可逆か。** `lossless` はデフォルトでオンです。ワークフローを通ったアニメーションは入ってきたままの絵で出ていくのが普通は望ましく、可逆 WebP でも同じフレームの GIF より小さいからです。非可逆 WebP は別物で、VP8 の動画符号化をフレームごとに適用したものです。写真的・レンダリング的な素材ではさらに桁違いに小さくなりますが、その代わり `quality` で決まるぼけやリンギングが乗ります。192×192・12 フレームのクリップ（グラデーション、柔らかい光の玉、エッジの立った動くブロック）での実測:
+
+| | `Save as GIF` 256 色 | `Save as GIF` 64 色 | 可逆 | 非可逆 90 | 非可逆 80 | 非可逆 60 |
+| --- | --- | --- | --- | --- | --- | --- |
+| ファイルサイズ | 226.7 KB | 161.3 KB | 140.2 KB | 9.2 KB | 5.8 KB | 3.6 KB |
+
+**可逆での `quality` と `method`。** どちらも効きますが、変わるのはエンコーダの手間だけです。`quality` 0〜100 は libwebp 可逆モードの探索の深さ、`method` 0〜6 は探索の幅で、出力はどの設定でも完全一致です。見返りは小さく、保証もありません。上のクリップでは `quality` 100 + `method` 6 がデフォルトの 50 倍の時間をかけて 4% *大きく* なりました。待つ価値のあるファイルでなければデフォルトのままにして、`info` のサイズで判断してください。
+
+**フレームの長さ。** WebP はフレームの長さをミリ秒で保持するため、ほとんどのフレームレートはほぼ格子に乗ります。GIF ノードと同じ累積丸めを使う（12fps なら 83, 84, 83, 83, 84… ms）ので、再生時間は元と一致します。`fps` の上限は 60 です。10 ms 以下のフレームは、ブラウザが GIF で 100 ms に読み替え始める領域で、そこに近づかないことには何のコストもないからです。
+
+**透過の余白。** `pad` のときの余白は本物のアルファとして書き込まれ、余白のないファイルにはアルファがまったく含まれません。`images` 出力では余白は GIF ノードと同じく黒に合成されます。GIF と同様、絵の部分は常に不透明です。ComfyUI の VIDEO にも IMAGE にもアルファチャンネルはありません。
 
 ## インストール
 

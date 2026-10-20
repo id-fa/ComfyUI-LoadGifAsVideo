@@ -1,7 +1,6 @@
 """SaveAsGif — write a VIDEO or an IMAGE batch out as an animated GIF."""
 
 import os
-from fractions import Fraction
 
 import numpy as np
 import torch
@@ -9,8 +8,16 @@ from PIL import Image
 
 import folder_paths
 
-from .video_length import speed_baked_indices
-
+from .save_frames import (
+    MAX_DIMENSION,
+    MAX_GAMMA,
+    MIN_GAMMA,
+    RESAMPLERS,
+    SIZE_MODES,
+    frame_durations,
+    prepare_frames,
+    resolve_source,
+)
 from .gif_dither import (
     DEFAULT_HALFTONE_SIZE,
     DEFAULT_HALFTONE_STEPS,
@@ -33,130 +40,20 @@ except ImportError:  # ComfyUI too old, or the module imported outside ComfyUI
 
 PALETTE_SCOPES = ["global", "per_frame"]
 
-# What `width` x `height` means when the source does not share its aspect ratio.
-# `pad` is the original behavior and stays the default: the box is the canvas
-# and the leftover is transparent bars. `fit` scales the frame into the box and
-# writes it at that size, so the box is an upper bound rather than the output.
-SIZE_MODES = ["pad", "fit"]
-
-# Ordered best-quality-first for a downscale, which is what saving a GIF usually
-# is. `nearest` is last because it is the specialist: it is the only one that
-# keeps pixel art and hard-edged animation from turning to mush.
-RESAMPLERS = {
-    "lanczos": Image.Resampling.LANCZOS,
-    "bicubic": Image.Resampling.BICUBIC,
-    "bilinear": Image.Resampling.BILINEAR,
-    "hamming": Image.Resampling.HAMMING,
-    "box": Image.Resampling.BOX,
-    "nearest": Image.Resampling.NEAREST,
-}
-
-# Canvas limit. Well past anything a GIF should be, and it only exists so a typo
-# cannot ask for an allocation that takes the server down.
-MAX_DIMENSION = 8192
-
 # GIF stores frame delays in centiseconds. Every browser re-times a delay under
 # 2cs to 10cs, so writing one would make a fast animation play ~5x too slow —
 # the same substitution `LoadGifAsVideo` compensates for on the way in. Clamping
 # here caps the output at 50fps, which is the real ceiling of the format.
 _MIN_DELAY_CS = 2
 
-# Matches the cap the two loader nodes apply, so a batch that could be built here
-# can always be saved.
-_MAX_FRAMES = 10000
-
-# `gamma` follows the image-editor convention (Photoshop's Levels midtone,
-# ImageMagick's -gamma): 1.0 is a no-op, above it brightens, below it darkens.
-# The range is wide on purpose — a black mask screen at full strength halves the
-# average tone, and pulling the midtones back up from that takes a value near 2.
-MIN_GAMMA = 0.1
-MAX_GAMMA = 10.0
-
-
-def _decimate(count, source_rate, output_rate):
-    """Indices that resample `count` frames down to `output_rate`, and the rate used.
-
-    Dropping frames is the cheapest thing that shrinks a GIF: half the frames is
-    close to half the file. The playback time is unchanged, because the delays are
-    then written at `output_rate` — 60 frames of 30fps material at 10fps becomes
-    20 frames that still run for two seconds.
-
-    Returns `(None, source_rate)` when nothing should be dropped.
-    """
-    source_rate = Fraction(source_rate).limit_denominator(10000)
-    output_rate = Fraction(output_rate).limit_denominator(1000)
-    if output_rate <= 0 or source_rate <= 0:
-        raise ValueError(
-            f"Frame rates must be positive (source {source_rate}, output {output_rate})"
-        )
-    if output_rate >= source_rate:
-        # Asking for a higher rate than the source has could only duplicate
-        # frames, which costs bytes and shows nothing new. Keep the source rate.
-        return None, source_rate
-
-    # Exactly the gather `LoopVideo` uses to bake `speed` into an IMAGE batch:
-    # stepping source_rate/output_rate frames per output frame is the same
-    # operation, and the rounding is already worked out there.
-    return speed_baked_indices(count, count, source_rate / output_rate), output_rate
-
 
 def _frame_delays(count, fps):
     """Per-frame delays in milliseconds, laid out on GIF's centisecond grid.
 
-    Each delay is the difference between consecutive rounded playback times
-    rather than one rounded delay repeated, so the rounding error stays bounded
-    instead of accumulating: 12fps comes out as 8,8,9,8,8,9,… centiseconds and
-    ends on the same wall clock as the source, not seconds early.
+    `frame_durations` does the bounded-rounding walk (8,8,9,8,8,9,… at 12fps);
+    this only puts it on the centisecond grid Pillow's GIF writer rounds to.
     """
-    if fps <= 0:
-        raise ValueError(f"Frame rate must be positive, got {fps}")
-
-    delays = []
-    elapsed = 0
-    for i in range(count):
-        step = max(_MIN_DELAY_CS, round((i + 1) * 100.0 / fps) - elapsed)
-        delays.append(step * 10)
-        elapsed += step
-    return delays
-
-
-def _fit(source_width, source_height, width, height, mode="pad"):
-    """Where a source frame lands given a `width` x `height` box.
-
-    Returns `(scaled_w, scaled_h, canvas_w, canvas_h, offset_x, offset_y)`. The
-    aspect ratio is always kept; `mode` decides what happens to the room left
-    over when the box does not match it. `pad` treats the box as the canvas,
-    centres the frame and leaves letterbox bars — those are what get written as
-    transparent. `fit` makes the scaled frame itself the output, so the box is
-    only an upper bound and nothing is padded. A zero on either axis means
-    "derive it", and zero on both means "leave it alone", so the widgets default
-    to doing nothing; with fewer than two axes given there is nothing to pad and
-    the two modes agree.
-    """
-    if mode not in SIZE_MODES:
-        raise ValueError(f"Unknown size mode: {mode}")
-    if width <= 0 and height <= 0:
-        return source_width, source_height, source_width, source_height, 0, 0
-    if width <= 0:
-        scaled_w = max(1, round(source_width * height / source_height))
-        return scaled_w, height, scaled_w, height, 0, 0
-    if height <= 0:
-        scaled_h = max(1, round(source_height * width / source_width))
-        return width, scaled_h, width, scaled_h, 0, 0
-
-    scale = min(width / source_width, height / source_height)
-    scaled_w = max(1, round(source_width * scale))
-    scaled_h = max(1, round(source_height * scale))
-    if mode == "fit":
-        return scaled_w, scaled_h, scaled_w, scaled_h, 0, 0
-    return (
-        scaled_w,
-        scaled_h,
-        width,
-        height,
-        (width - scaled_w) // 2,
-        (height - scaled_h) // 2,
-    )
+    return [cs * 10 for cs in frame_durations(count, fps, 100, _MIN_DELAY_CS)]
 
 
 def _spare_color(palette):
@@ -206,50 +103,6 @@ def _with_transparency(palette, spare=None):
     if spare is None:
         spare = _spare_color(palette)
     return np.vstack([spare, palette]).astype(np.uint8)
-
-
-def _to_uint8(images, size=None, resample=None, gamma=1.0):
-    """A ComfyUI IMAGE batch as a uint8 [N, H, W, 3] array, optionally scaled.
-
-    Converted a frame at a time: the whole batch as float32 is four times the
-    size of the result, and a long animation is already large. Scaling in the
-    same pass keeps the full-resolution copy from ever existing.
-
-    `gamma` is applied here, on the float frame before it is rounded to 8 bits,
-    so the tone curve costs no precision and every later stage — the palette,
-    the dither, the `images` output — sees the corrected frame. Black and white
-    stay where they are; only the midtones move.
-    """
-    count, height, width = (int(images.shape[k]) for k in range(3))
-    if size is not None:
-        width, height = size
-    if count == 0:
-        raise ValueError("There are no frames to save")
-    if count > _MAX_FRAMES:
-        raise ValueError(f"Cannot save {count} frames; the limit is {_MAX_FRAMES}")
-    gamma = float(gamma)
-    if not MIN_GAMMA <= gamma <= MAX_GAMMA:
-        raise ValueError(f"gamma must be between {MIN_GAMMA} and {MAX_GAMMA}")
-    # Skipped at exactly 1.0 so the default stays bit-exact with what the node
-    # wrote before the widget existed, rather than trusting pow(x, 1.0) to be.
-    exponent = None if gamma == 1.0 else 1.0 / gamma
-
-    frames = np.empty((count, height, width, 3), dtype=np.uint8)
-    for i in range(count):
-        frame = images[i, ..., :3]
-        if torch.is_tensor(frame):
-            frame = frame.detach().cpu().numpy()
-        linear = np.clip(np.asarray(frame, dtype=np.float32), 0.0, 1.0)
-        if exponent is not None:
-            linear = np.power(linear, np.float32(exponent))
-        scaled = np.clip(np.rint(linear * 255.0), 0, 255)
-        if size is None:
-            frames[i] = scaled
-        else:
-            frames[i] = np.asarray(
-                Image.fromarray(scaled.astype(np.uint8)).resize(size, resample)
-            )
-    return frames
 
 
 def _page(indices, palette):
@@ -489,42 +342,18 @@ class SaveAsGif:
         pillow_optimize=False,
         gamma=1.0,
     ):
-        if video is not None and images is not None:
-            raise ValueError(
-                "Connect either `video` or `images`, not both — they would have "
-                "different frame rates"
-            )
-        if video is not None:
-            components = video.get_components()
-            source, source_rate = components.images, components.frame_rate
-        elif images is not None:
-            source, source_rate = images, source_fps
-        else:
-            raise ValueError("Connect a `video` or an `images` batch to save")
+        source, source_rate = resolve_source(video, images, source_fps)
 
-        # Drop frames before anything else looks at them: the palette should be
-        # built from the frames that actually get written, and everything
-        # downstream then costs proportionally less.
-        keep, frame_rate = _decimate(int(source.shape[0]), source_rate, fps)
-        if keep is not None:
-            source = source[torch.from_numpy(keep)]
-
-        if resample not in RESAMPLERS:
-            raise ValueError(f"Unknown resample filter: {resample}")
-        scaled_w, scaled_h, canvas_w, canvas_h, offset_x, offset_y = _fit(
-            int(source.shape[2]), int(source.shape[1]), width, height, size_mode
+        # The shared front half: drop frames down to `fps` before anything else
+        # looks at them (the palette should be built from the frames that get
+        # written), scale into the box, and apply the tone curve ahead of
+        # everything that looks at colors — a mask screen's ink is fixed and
+        # never sees it, so raising gamma lifts only the ground between the
+        # dots, which is exactly the part a black screen makes look too dark.
+        frames, frame_rate, layout = prepare_frames(
+            source, source_rate, fps, width, height, size_mode, resample, gamma
         )
-        resized = (scaled_w, scaled_h) != (int(source.shape[2]), int(source.shape[1]))
-        # The tone curve goes in here, ahead of everything that looks at colors:
-        # a mask screen's ink is fixed and never sees it, so raising gamma lifts
-        # only the ground between the dots, which is exactly the part a black
-        # screen makes look too dark.
-        frames = _to_uint8(
-            source,
-            (scaled_w, scaled_h) if resized else None,
-            RESAMPLERS[resample],
-            gamma,
-        )
+        scaled_w, scaled_h, canvas_w, canvas_h, offset_x, offset_y = layout
         count = frames.shape[0]
 
         # Bars are only needed when the source does not share the canvas's aspect
