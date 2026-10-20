@@ -207,7 +207,7 @@ class SaveAsAnimatedWebP:
                 "lossless": (
                     "BOOLEAN",
                     {
-                        "default": True,
+                        "default": False,
                         "tooltip": "Lossless WebP stores every pixel exactly, so the file decodes back to the `images` output bit for bit; `quality` then only trades encode time for file size. Off writes lossy WebP (VP8), where `quality` is the usual quality/size trade and is much smaller on photographic material.",
                     },
                 ),

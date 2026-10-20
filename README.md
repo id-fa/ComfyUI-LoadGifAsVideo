@@ -237,7 +237,7 @@ Writes a VIDEO or an image batch out as an animated WebP. WebP stores full 24-bi
 | `height` | INT | Output height in pixels. `0` keeps the source height, or derives it from `width`. |
 | `size_mode` | `pad` / `fit` | What `width` × `height` means when the source's aspect ratio differs: `pad` writes a file of exactly that size with transparent bars, `fit` writes the largest frame that fits inside it, with no bars. |
 | `resample` | see [Resample filters](#resample-filters) | Filter used when scaling. |
-| `lossless` | BOOLEAN | On (default): every pixel is stored exactly and the file decodes back to the `images` output bit for bit. Off: lossy VP8, much smaller on photographic material. |
+| `lossless` | BOOLEAN | Off (default): lossy VP8, much smaller on photographic material. On: every pixel is stored exactly and the file decodes back to the `images` output bit for bit. |
 | `quality` | INT | Lossy: picture quality, 0–100. Lossless: compression *effort*, 0 (fast) to 100 (slow) — the pixels are exact either way. |
 | `method` | INT | How hard libwebp tries, 0 (fastest) to 6 (slowest, smallest). Changes only time and size, never the picture at a given quality. |
 | `loop_count` | INT | How many times the animation plays. `0` loops forever. |
@@ -362,7 +362,7 @@ The transparent slot costs one palette entry, so a letterboxed GIF quantizes to 
 
 ### Save as Animated WebP only
 
-**Lossless or lossy.** `lossless` is on by default, because an animation that has been through a workflow usually deserves to come out as it went in, and a lossless WebP is still smaller than the GIF of the same frames. Lossy WebP is a different thing: it is VP8 video coding applied frame by frame, and on photographic or rendered material it is smaller by an order of magnitude again, at the cost of the softness and ringing `quality` controls. On a 192×192 twelve-frame clip (a gradient, a soft blob and a moving hard-edged block):
+**Lossless or lossy.** `lossless` is off by default, so the node writes lossy WebP: VP8 video coding applied frame by frame, which on photographic or rendered material is smaller by an order of magnitude than the lossless file, at the cost of the softness and ringing `quality` controls. Turn it on when an animation that has been through a workflow should come out exactly as it went in; a lossless WebP is still smaller than the GIF of the same frames. On a 192×192 twelve-frame clip (a gradient, a soft blob and a moving hard-edged block):
 
 | | `Save as GIF` 256 colors | `Save as GIF` 64 colors | lossless | lossy 90 | lossy 80 | lossy 60 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -634,7 +634,7 @@ VIDEO または画像バッチをアニメーション WebP として書き出�
 | `height` | INT | 出力の高さ（ピクセル）。`0` でソースの高さのまま、または `width` から比率で決定。 |
 | `size_mode` | `pad` / `fit` | ソースとアスペクト比が違うときの `width` × `height` の意味。`pad` はそのサイズのキャンバスに収めて余白を透過にし、`fit` はそのサイズに収まる最大サイズで余白なしに書き出します。 |
 | `resample` | [リサンプルフィルタ](#リサンプルフィルタresample)参照 | 拡大縮小に使うフィルタ。 |
-| `lossless` | BOOLEAN | オン（デフォルト）: 全ピクセルをそのまま保存し、ファイルは `images` 出力とビット単位で一致します。オフ: 非可逆 VP8。写真的な素材ではずっと小さくなります。 |
+| `lossless` | BOOLEAN | オフ（デフォルト）: 非可逆 VP8。写真的な素材ではずっと小さくなります。オン: 全ピクセルをそのまま保存し、ファイルは `images` 出力とビット単位で一致します。 |
 | `quality` | INT | 非可逆: 画質、0〜100。可逆: 圧縮の *手間*、0（速い）〜100（遅い）。可逆ではどの値でもピクセルは完全一致です。 |
 | `method` | INT | libwebp の探索の深さ、0（最速）〜6（最も遅く、最も小さい）。同じ quality なら絵は変わらず、時間とサイズだけが変わります。 |
 | `loop_count` | INT | アニメーションの再生回数。`0` で無限ループ。 |
@@ -759,7 +759,7 @@ ComfyUI_00042_.gif
 
 ### Save as Animated WebP のみ
 
-**可逆か非可逆か。** `lossless` はデフォルトでオンです。ワークフローを通ったアニメーションは入ってきたままの絵で出ていくのが普通は望ましく、可逆 WebP でも同じフレームの GIF より小さいからです。非可逆 WebP は別物で、VP8 の動画符号化をフレームごとに適用したものです。写真的・レンダリング的な素材ではさらに桁違いに小さくなりますが、その代わり `quality` で決まるぼけやリンギングが乗ります。192×192・12 フレームのクリップ（グラデーション、柔らかい光の玉、エッジの立った動くブロック）での実測:
+**可逆か非可逆か。** `lossless` はデフォルトでオフで、ノードは非可逆 WebP を書き出します。これは VP8 の動画符号化をフレームごとに適用したもので、写真的・レンダリング的な素材では可逆ファイルより桁違いに小さくなりますが、その代わり `quality` で決まるぼけやリンギングが乗ります。ワークフローを通ったアニメーションを入ってきたままの絵で出したいときはオンにしてください。可逆 WebP でも同じフレームの GIF より小さいです。192×192・12 フレームのクリップ（グラデーション、柔らかい光の玉、エッジの立った動くブロック）での実測:
 
 | | `Save as GIF` 256 色 | `Save as GIF` 64 色 | 可逆 | 非可逆 90 | 非可逆 80 | 非可逆 60 |
 | --- | --- | --- | --- | --- | --- | --- |
