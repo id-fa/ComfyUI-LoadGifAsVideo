@@ -26,7 +26,8 @@ const ROUTE = "/loadgifasvideo/video"
 const ACCENT = "#38bdf8"
 const MATCH = "#f59e0b"
 const MIN_WIDTH = 620
-const PANEL_MIN_HEIGHT = 520
+const PANEL_MIN_HEIGHT = 548
+const MAX_SPEED = 4 // mirrors MAX_SPEED in load_video_trim_node.py
 const THUMB_SIZE = 256
 const PREVIEW_SIZE = 768
 const FINGERPRINT_SIZES = [16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 640]
@@ -69,6 +70,19 @@ const STYLE = `
 .lgav-muted { color:#888; }
 .lgav-accent { color:${ACCENT}; }
 .lgav-error { color:#ff6b6b; }
+@keyframes lgav-spin { to { transform:rotate(360deg); } }
+@keyframes lgav-slide { to { background-position:40px 0; } }
+@keyframes lgav-pulse { 50% { border-color:${ACCENT}; box-shadow:0 0 6px ${ACCENT}88; } }
+.lgav-spinner::before { content:""; display:inline-block; width:10px; height:10px; margin-right:6px;
+  vertical-align:-1px; border-radius:50%; border:2px solid #555; border-top-color:${ACCENT};
+  animation:lgav-spin .8s linear infinite; }
+.lgav-progress { display:none; height:3px; border-radius:2px; flex-shrink:0;
+  background:repeating-linear-gradient(90deg, ${ACCENT} 0 20px, ${ACCENT}33 20px 40px); background-size:40px 3px;
+  animation:lgav-slide .7s linear infinite; }
+.lgav-busy .lgav-progress { display:block; }
+.lgav-busy .lgav-results { opacity:.4; pointer-events:none; }
+.lgav-busy .lgav-status { color:${ACCENT}; }
+.lgav-busy button.lgav-search { animation:lgav-pulse 1.2s ease-in-out infinite; }
 .lgav-preview { position:relative; flex:1 1 0; min-height:100px; background:#000; border-radius:4px;
   overflow:hidden; display:flex; align-items:center; justify-content:center; }
 .lgav-preview video, .lgav-preview img.lgav-still { max-width:100%; max-height:100%; width:100%; height:100%;
@@ -95,9 +109,9 @@ const STYLE = `
   box-shadow:0 0 3px #000; }
 .lgav-playhead { position:absolute; top:0; bottom:0; width:2px; margin-left:-1px; background:#ff4d4d; pointer-events:none; }
 .lgav-playhead::before { content:""; position:absolute; top:0; left:-4px; border:5px solid transparent; border-top-color:#ff4d4d; }
-.lgav-results { max-height:112px; min-height:22px; flex-shrink:0; overflow-y:auto; background:#111; border:1px solid #333; border-radius:4px;
-  padding:2px; display:flex; flex-direction:column; gap:1px; }
-.lgav-res { display:flex; align-items:center; gap:6px; padding:1px 4px; border-radius:3px; cursor:pointer; }
+.lgav-results { max-height:132px; min-height:22px; flex-shrink:0; overflow-y:auto; background:#111; border:1px solid #333; border-radius:4px;
+  padding:2px; display:flex; flex-direction:column; gap:1px; transition:opacity .2s; }
+.lgav-res { display:flex; align-items:center; gap:6px; padding:1px 4px; border-radius:3px; cursor:pointer; font-size:13px; }
 .lgav-res:hover { background:#222; }
 .lgav-res.lgav-sel { background:${ACCENT}33; }
 .lgav-res.lgav-qrow { border-left:3px solid #fff; padding-left:3px; margin-bottom:2px; }
@@ -105,12 +119,12 @@ const STYLE = `
 .lgav-marker.lgav-near { opacity:.35; }
 .lgav-res.lgav-qrow .lgav-accent { color:#fff; }
 .lgav-res .lgav-grow { flex:1; }
-.lgav-res button { padding:0 5px; line-height:15px; }
+.lgav-res button { padding:0 5px; line-height:16px; }
 .lgav-thumbs { display:flex; gap:6px; flex-shrink:0; }
 .lgav-thumb { flex:1 1 0; min-width:0; display:flex; flex-direction:column; gap:2px; align-items:stretch; }
 .lgav-thumb .lgav-img { height:80px; background:#000; border-radius:3px; display:flex; align-items:center; justify-content:center; overflow:hidden; }
 .lgav-thumb img { max-width:100%; max-height:100%; object-fit:contain; }
-.lgav-thumb .lgav-cap { font-size:11px; text-align:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.lgav-thumb .lgav-cap { font-size:13px; text-align:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 `
 
 function el(tag, props = {}, children = []) {
@@ -142,6 +156,15 @@ function fmtTime(seconds) {
   return `${m}:${s.toFixed(2).padStart(5, "0")}`
 }
 
+// Python's round(): half to even, so the frame count shown matches the node's.
+function roundHalfEven(v) {
+  const f = Math.floor(v)
+  const d = v - f
+  if (d > 0.5) return f + 1
+  if (d < 0.5) return f
+  return f % 2 === 0 ? f : f + 1
+}
+
 function splitName(name) {
   const i = name.lastIndexOf("/")
   return i < 0 ? ["", name] : [name.slice(0, i), name.slice(i + 1)]
@@ -151,7 +174,7 @@ class TrimPanel {
   constructor(node) {
     this.node = node
     this.widgets = {}
-    for (const name of ["file", "start_frame", "end_frame", "crop_x", "crop_y", "crop_w", "crop_h"]) {
+    for (const name of ["file", "start_frame", "end_frame", "crop_x", "crop_y", "crop_w", "crop_h", "speed"]) {
       this.widgets[name] = node.widgets?.find((w) => w.name === name)
     }
     this.info = null
@@ -171,6 +194,7 @@ class TrimPanel {
     this.metric = "pixels"
     this.blur = 0
     this.busy = false
+    this.busyTimer = null
     this.configuring = false
     this.loadedFile = null
     this.raf = null
@@ -223,6 +247,14 @@ class TrimPanel {
     return e <= 0 || e > n ? n : e
   }
 
+  // The `speed` widget's value; a node saved before the widget existed has none, which is 1.
+  get speed() {
+    const w = this.widgets.speed
+    if (!w) return 1
+    const v = Number(w.value)
+    return isFinite(v) ? clamp(v, -MAX_SPEED, MAX_SPEED) : 1
+  }
+
   hookWidgets() {
     const hook = (name, fn) => {
       const w = this.widgets[name]
@@ -237,6 +269,20 @@ class TrimPanel {
     hook("file", () => this.onFileChanged(!this.configuring))
     for (const name of ["start_frame", "end_frame"]) hook(name, () => this.onRangeChanged())
     for (const name of ["crop_x", "crop_y", "crop_w", "crop_h"]) hook(name, () => this.refreshCrop())
+    hook("speed", () => this.onSpeedChanged())
+  }
+
+  // The preview plays at |speed| so the slider can be judged by eye; the
+  // browser cannot play backwards, so a negative speed previews forwards and
+  // the range label says "reversed". The node bakes the real thing.
+  onSpeedChanged() {
+    const rate = clamp(Math.abs(this.speed) || 1, 0.0625, 16)
+    const v = this.ui.video
+    v.defaultPlaybackRate = rate
+    try {
+      v.playbackRate = rate
+    } catch {}
+    this.refreshRange()
   }
 
   // ---- persistence ---------------------------------------------------------
@@ -500,8 +546,8 @@ class TrimPanel {
       ui.blur.value = this.blur
       this.saveNow()
     })
-    ui.search = el("button", { text: "Find similar", title: "List frames that look like the frame under the playhead", onclick: () => this.search() })
-    ui.status = el("span", { class: "lgav-grow lgav-muted", text: "" })
+    ui.search = el("button", { class: "lgav-search", text: "Find similar", title: "List frames that look like the frame under the playhead", onclick: () => this.search() })
+    ui.status = el("span", { class: "lgav-grow lgav-muted lgav-status", text: "" })
     root.appendChild(
       el("div", { class: "lgav-row" }, [
         el("span", { class: "lgav-accent", text: "Loop assist" }),
@@ -525,6 +571,11 @@ class TrimPanel {
         ui.status,
       ])
     )
+    // An indeterminate bar while the search runs: the request is one round trip
+    // and the server reports nothing in between, so this (with the spinner,
+    // the dimmed list and the elapsed seconds) is what says "still working".
+    ui.progress = el("div", { class: "lgav-progress" })
+    root.appendChild(ui.progress)
     ui.results = el("div", { class: "lgav-results" })
     root.appendChild(ui.results)
 
@@ -648,6 +699,7 @@ class TrimPanel {
     this.loadedFile = name
     this.info = null
     this.imageMode = false
+    if (this.busy) this.setBusy(false)
     this.abort?.abort()
     this.abort = null
     const ui = this.ui
@@ -665,6 +717,7 @@ class TrimPanel {
     ui.empty.style.display = "none"
     ui.video.src = this.viewURL(name)
     ui.info.textContent = `${name} — indexing…`
+    ui.info.classList.add("lgav-spinner")
     this.fetchInfo(name)
   }
 
@@ -674,6 +727,7 @@ class TrimPanel {
       const resp = await api.fetchApi(`${ROUTE}/info?file=${encodeURIComponent(name)}`, { signal: ctrl.signal })
       const data = await resp.json()
       if (ctrl.signal.aborted || name !== this.loadedFile) return
+      this.ui.info.classList.remove("lgav-spinner")
       if (!resp.ok) throw new Error(data.error || resp.statusText)
       this.info = data
       this.frame = clamp(this.frame, 0, data.frames - 1)
@@ -686,6 +740,7 @@ class TrimPanel {
     } catch (err) {
       if (ctrl.signal.aborted) return
       console.error("[LoadVideoTrim] info failed", err)
+      this.ui.info.classList.remove("lgav-spinner")
       this.ui.info.textContent = `${name} — ${err.message || err}`
       this.ui.info.classList.add("lgav-error")
       setTimeout(() => this.ui.info.classList.remove("lgav-error"), 4000)
@@ -741,6 +796,7 @@ class TrimPanel {
     const v = this.ui.video
     if (this.frame < this.start || this.frame >= this.end) this.seek(this.start)
     this.playing = true
+    this.onSpeedChanged()
     v.play().catch(() => {
       this.playing = false
       this.refreshTransport()
@@ -1067,21 +1123,39 @@ class TrimPanel {
     this.ui.status.classList.toggle("lgav-error", error)
   }
 
+  // Everything that says "a search is running": the root class drives the
+  // CSS (spinner, bar, dimmed list, pulsing button), the button's label
+  // changes, and the status line counts the seconds, which is what tells a
+  // 30-second re-index apart from a hang.
+  setBusy(on, text = "") {
+    this.busy = on
+    const ui = this.ui
+    this.root.classList.toggle("lgav-busy", on)
+    ui.status.classList.toggle("lgav-spinner", on)
+    ui.search.disabled = on || !this.info
+    ui.search.textContent = on ? "Searching…" : "Find similar"
+    clearInterval(this.busyTimer)
+    this.busyTimer = null
+    if (!on) return
+    const started = performance.now()
+    this.setStatus(text)
+    this.busyTimer = setInterval(() => {
+      const s = Math.round((performance.now() - started) / 1000)
+      if (s >= 2) this.setStatus(`${text} ${s} s`)
+    }, 1000)
+  }
+
   async search() {
     if (!this.info || this.busy) return
     if (this.playing) this.pause()
     const name = this.file
     const query = this.frame
-    this.busy = true
-    this.ui.search.disabled = true
     const fp = this.fingerprint
     const rangeOnly = this.rangeOnly
     const rs = this.start
     const re = this.end
     if (rangeOnly && (query < rs || query >= re)) {
       this.setStatus(`The playhead (#${query}) is outside the range #${rs}–#${re - 1}; move it inside, or untick "range only".`, true)
-      this.busy = false
-      this.ui.search.disabled = false
       return
     }
     const crop = this.cropRect()
@@ -1096,7 +1170,7 @@ class TrimPanel {
       (rangeOnly && (last.start !== rs || last.end !== re))
     const where = (rangeOnly ? ` within #${rs}–#${re - 1}` : "") + (cropKey ? ", crop only" : "")
     const how = (this.metric === "motion" ? ", motion-weighted" : "") + (this.blur > 0 ? `, blur ${this.blur}` : "")
-    this.setStatus(`Searching for frames like #${query} on a ${fp}×${fp} grid${where}${how}${reindex ? " (reading the frames for this grid first)" : ""}…`)
+    this.setBusy(true, `Searching for frames like #${query} on a ${fp}×${fp} grid${where}${how}${reindex ? " (reading the frames for this grid first)" : ""}…`)
     try {
       const range = rangeOnly ? `&start=${rs}&end=${re}` : ""
       const cropParam = cropKey ? `&crop=${cropKey}` : ""
@@ -1105,6 +1179,7 @@ class TrimPanel {
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error || resp.statusText)
       if (name !== this.file) return
+      this.setBusy(false)
       this.query = query
       this.results = data
       this.selected = null
@@ -1112,10 +1187,10 @@ class TrimPanel {
       this.saveNow()
     } catch (err) {
       console.error("[LoadVideoTrim] search failed", err)
+      this.setBusy(false)
       this.setStatus(`Search failed: ${err.message || err}`, true)
     } finally {
-      this.busy = false
-      this.ui.search.disabled = false
+      if (this.busy) this.setBusy(false)
     }
   }
 
@@ -1219,6 +1294,7 @@ class TrimPanel {
     ui.play.disabled = !ok || this.imageMode
     ui.play.title = this.imageMode ? "This container cannot be played by the browser; step through frames instead" : "Play / pause the range (Space)"
     ui.search.disabled = !ok || this.busy
+    ui.search.textContent = this.busy ? "Searching…" : "Find similar"
     ui.setStart.disabled = ui.setEnd.disabled = !ok
     ui.cropBtn.disabled = !ok
   }
@@ -1256,6 +1332,16 @@ class TrimPanel {
     const count = Math.max(0, e - s)
     const endText = e >= n ? `end of file (#${n})` : `end #${e} (excluded)`
     ui.rangeLabel.appendChild(el("span", { text: `start #${s} → ${endText}: ${count} frames, ${fmtTime(count / this.fps)}` }))
+    const speed = this.speed
+    if (speed !== 1 && count > 0) {
+      // Mirrors speed_order(): round(count / |speed|) frames at the file's own rate.
+      const out = speed === 0 ? 0 : Math.max(1, roundHalfEven(count / Math.abs(speed)))
+      const text =
+        speed === 0
+          ? "speed 0 is not allowed; the node will refuse to run"
+          : `speed ×${Number(Math.abs(speed).toFixed(2))}${speed < 0 ? " reversed" : ""} → ${out} frames, ${fmtTime(out / this.fps)}, no audio`
+      ui.rangeLabel.appendChild(el("span", { class: speed === 0 ? "lgav-error" : "lgav-accent", style: { marginLeft: "8px" }, text }))
+    }
   }
 
   refreshThumbs() {
@@ -1293,6 +1379,7 @@ class TrimPanel {
     try {
       this.restore()
       this.onFileChanged(false)
+      this.onSpeedChanged()
     } finally {
       this.configuring = false
     }
@@ -1304,6 +1391,7 @@ class TrimPanel {
     this.abort?.abort()
     clearTimeout(this.saveTimer)
     clearTimeout(this.thumbTimer)
+    clearInterval(this.busyTimer)
     this.resizeObserver?.disconnect()
     this.ui.video.removeAttribute("src")
     this.ui.video.load()

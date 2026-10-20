@@ -157,7 +157,7 @@ def fit(source_width, source_height, width, height, mode="pad"):
     )
 
 
-def to_uint8(images, size=None, resample=None, gamma=1.0):
+def to_uint8(images, size=None, resample=None, gamma=1.0, progress=None):
     """A ComfyUI IMAGE batch as a uint8 [N, H, W, 3] array, optionally scaled.
 
     Converted a frame at a time: the whole batch as float32 is four times the
@@ -168,6 +168,9 @@ def to_uint8(images, size=None, resample=None, gamma=1.0):
     so the tone curve costs no precision and every later stage — the palette,
     the dither, the encoder, the `images` output — sees the corrected frame.
     Black and white stay where they are; only the midtones move.
+
+    `progress(done, total)`, if given, is called after every frame; it is where
+    a cancelled job gets to stop a long resize.
     """
     count, height, width = (int(images.shape[k]) for k in range(3))
     if size is not None:
@@ -198,10 +201,14 @@ def to_uint8(images, size=None, resample=None, gamma=1.0):
             frames[i] = np.asarray(
                 Image.fromarray(scaled.astype(np.uint8)).resize(size, resample)
             )
+        if progress is not None:
+            progress(i + 1, count)
     return frames
 
 
-def prepare_frames(source, source_rate, fps, width, height, size_mode, resample, gamma):
+def prepare_frames(
+    source, source_rate, fps, width, height, size_mode, resample, gamma, progress=None
+):
     """The whole shared front half: decimate, fit, scale, tone-correct, round.
 
     Returns `(frames, frame_rate, layout)` where `frames` is uint8 [N, H, W, 3]
@@ -209,6 +216,7 @@ def prepare_frames(source, source_rate, fps, width, height, size_mode, resample,
     the canvas and where on it the picture goes. Frames are dropped before
     anything else looks at them: a palette should be built from the frames
     that actually get written, and every later stage costs proportionally less.
+    `progress` is handed to `to_uint8`, which reports once per kept frame.
     """
     keep, frame_rate = decimate(int(source.shape[0]), source_rate, fps)
     if keep is not None:
@@ -224,5 +232,6 @@ def prepare_frames(source, source_rate, fps, width, height, size_mode, resample,
         (scaled_w, scaled_h) if resized else None,
         RESAMPLERS[resample],
         gamma,
+        progress,
     )
     return frames, frame_rate, layout

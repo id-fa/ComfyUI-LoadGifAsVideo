@@ -71,11 +71,14 @@ Loads a frame range of a video file as a VIDEO (with the audio of that range) an
 | `end_frame` | INT | The frame the range stops **before**; it is not included. `0` means the end of the file. |
 | `crop_x`, `crop_y` | INT | Top-left corner of the crop box in pixels. |
 | `crop_w`, `crop_h` | INT | Size of the crop box in pixels. `0` runs to the right / bottom edge, so all zeros is no crop. |
+| `speed` | FLOAT (slider) | Playback speed, −4 to 4, baked into the frames at the file's own frame rate. `2` keeps every other frame of the range, `0.5` repeats each frame, a negative value plays the range backwards. Anything but `1` drops the audio. `0` is refused. |
 
 | Output | Type | Description |
 | --- | --- | --- |
-| `video` | VIDEO | The range, cropped, at the file's own frame rate, with its audio. |
+| `video` | VIDEO | The range, cropped, at the file's own frame rate, with its audio (at `speed = 1`). |
 | `images` | IMAGE | The same frames as an image batch. |
+| `fps` | FLOAT | The file's frame rate — the one `video` carries. `speed` does not change it. |
+| `width`, `height` | INT | Size of the frames as emitted, i.e. after the crop. |
 
 **`end_frame` is exclusive, and that is the point.** The range is `start_frame <= frame < end_frame`. When the loop assist finds that frame 340 looks like frame 100, set `start_frame = 100` and `end_frame = 340`: the output is frames 100–339, and looping it jumps from 339 back to 100, which is what 340 looked like. An inclusive end would show that picture twice at the seam. The panel's two thumbnails show exactly these two frames — `Start` and `End (excluded, loop returns here)`, cropped the way the node will cut them — so a seamless loop is one where they look the same.
 
@@ -95,7 +98,9 @@ The scores of anything worth considering sit in a narrow band just under 100 (on
 
 **Frame numbers are exact.** The first time a file is opened, the server decodes it once to record every frame's timestamp and a small fingerprint; that is what the search compares and what the thumbnails, the panel and the node all seek by, so frame 340 is the same frame everywhere. The pass takes about as long as decoding the file and is kept in memory, so later searches are instant and the node reuses it when the graph runs. The preview itself is the browser's video player; if it cannot play the container (MKV, AVI…), the panel shows server-rendered frames instead and stepping still works, only playback is off.
 
-**Audio** is cut to the same range. **Length and speed** are deliberately not here — hand the output to `Loop Video` for that. The range is capped at 10000 frames.
+**`speed` is frames, not a frame rate.** The file's rate is reported unchanged on `fps` and carried by `video`, so a speed change has to be expressed in the frames themselves: at `2` the node emits every other frame of the range, at `0.5` every frame twice, at `1.5` two frames of every three — the same stepping `Loop Video` uses for its `images` output, `round(count / |speed|)` frames in all. A negative value walks that sequence from the end of the range back to its start, so `-1` is the range reversed frame for frame. The panel previews the magnitude (the browser cannot play backwards) and its range label says what will come out. Audio is kept only at exactly `1`: with the frame rate fixed, anything else would need the waveform resampled or reversed to stay in step, and no audio beats wrong audio.
+
+**Audio** is cut to the same range. **Length** is deliberately not here — hand the output to `Loop Video` for that. The range is capped at 10000 frames, and so is the output after `speed` (a slow speed on a long range can hit it first).
 
 ### Save as GIF
 
@@ -245,7 +250,7 @@ Writes a VIDEO or an image batch out as an animated WebP. WebP stores full 24-bi
 
 ## Behavior
 
-The length and speed controls behave identically in `Load GIF as Video` and `Loop Video`. `Load Video (Trim & Loop Assist)` has neither — it cuts a range and leaves length and speed to `Loop Video`.
+The length and speed controls behave identically in `Load GIF as Video` and `Loop Video`. `Load Video (Trim & Loop Assist)` has no length control — it cuts a range and leaves looping to `Loop Video` — and its `speed` works differently: it is baked into the frames at the file's own rate (and can be negative), see [that node](#load-video-trim--loop-assist).
 
 **Frame rate is automatic.** The `video` output's frame rate comes from the source itself — its own rate multiplied by `speed`. There is no fps widget. Frames are never interpolated, and at `speed = 1.0` both outputs are a frame-for-frame copy of the source at its original timing.
 
@@ -369,6 +374,8 @@ The transparent slot costs one palette entry, so a letterboxed GIF quantizes to 
 
 **Transparent bars.** Under `pad` the letterbox bars are written as real alpha, and a file with no bars carries no alpha at all. The `images` output composites the bars onto black, the way the GIF node's does. As with GIF, the picture itself is always opaque: neither VIDEO nor IMAGE carries an alpha channel in ComfyUI.
 
+**Progress and cancel.** The node's progress bar runs over three passes — converting the frames, encoding them, reading the file back — and Cancel takes effect between frames of whichever is running, so a long lossless encode at `method` 6 stops within a frame or two. Nothing is written until the encode is complete, so a cancelled job leaves no file behind.
+
 ## Installation
 
 Via ComfyUI Manager, or clone into `ComfyUI/custom_nodes/`:
@@ -461,11 +468,14 @@ The quantizers and dithering filters are clean-room implementations written from
 | `end_frame` | INT | 範囲が**その手前で終わる**フレーム。このフレーム自体は含まれません。`0` はファイル末尾まで。 |
 | `crop_x`, `crop_y` | INT | クロップ枠の左上座標（ピクセル）。 |
 | `crop_w`, `crop_h` | INT | クロップ枠のサイズ（ピクセル）。`0` は右端 / 下端まで。すべて 0 ならクロップなしです。 |
+| `speed` | FLOAT（スライダー） | 再生速度、−4〜4。フレームレートはファイルのまま、フレーム自体に焼き込みます。`2` なら範囲のフレームを 1 枚おきに、`0.5` なら各フレームを 2 回ずつ、負の値なら範囲を逆再生します。`1` 以外ではオーディオは付きません。`0` はエラーです。 |
 
 | 出力 | 型 | 説明 |
 | --- | --- | --- |
-| `video` | VIDEO | 指定範囲をクロップしたもの。フレームレートはファイルのまま、オーディオ付き。 |
+| `video` | VIDEO | 指定範囲をクロップしたもの。フレームレートはファイルのまま、オーディオ付き（`speed = 1` のとき）。 |
 | `images` | IMAGE | 同じフレームの画像バッチ。 |
+| `fps` | FLOAT | ファイルのフレームレート。`video` が持つレートと同じで、`speed` では変わりません。 |
+| `width`, `height` | INT | 出力フレームのサイズ、つまりクロップ後の値。 |
 
 **`end_frame` は範囲に含まれず、それが狙いです。** 範囲は `start_frame <= frame < end_frame` です。ループアシストでフレーム 340 がフレーム 100 と同じ絵だと分かったら、`start_frame = 100`、`end_frame = 340` にします。出力はフレーム 100〜339 になり、ループ再生では 339 から 100 に戻ります。100 は 340 と同じ絵なので継ぎ目が出ません。終端を含める方式だと、継ぎ目で同じ絵が 2 回表示されてしまいます。パネルの 2 枚のサムネイルはまさにこの 2 フレーム、`Start` と `End (excluded, loop returns here)` を、ノードが切り出すのと同じクロップで表示するので、両者が同じに見えればループは滑らかです。
 
@@ -485,7 +495,9 @@ The quantizers and dithering filters are clean-room implementations written from
 
 **フレーム番号は正確です。** ファイルを初めて開いたとき、サーバーが一度だけ全体をデコードして各フレームのタイムスタンプと小さなフィンガープリントを記録します。検索はこれを比較し、サムネイル・パネル・ノードのすべてがこれを使ってシークするので、フレーム 340 はどこでも同じフレームです。この処理はファイルのデコードと同程度の時間がかかり、結果はメモリに保持されるため、以降の検索は一瞬で、グラフ実行時のノードも再利用します。プレビュー自体はブラウザの動画プレイヤーです。ブラウザが再生できないコンテナ（MKV、AVI など）では、代わりにサーバーが描画したフレームを表示します。コマ送りはそのまま使え、再生だけが無効になります。
 
-**オーディオ**も同じ範囲に切り出されます。**長さと速度**の指定は意図的にありません。出力を `Loop Video` に渡してください。範囲は 10000 フレームが上限です。
+**`speed` はフレームレートではなくフレームで表現します。** ファイルのレートは `fps` にそのまま出力され、`video` もそのレートを持つので、速度の変化はフレーム自体で表すしかありません。`2` なら範囲のフレームを 1 枚おきに、`0.5` なら各フレームを 2 回ずつ、`1.5` なら 3 枚のうち 2 枚を出力します。`Loop Video` が `images` 出力に使うのと同じ刻み方で、全体で `round(フレーム数 / |speed|)` 枚になります。負の値はその並びを範囲の末尾から先頭へ向かって辿るので、`-1` は範囲をそのまま逆順にしたものです。パネルのプレビューは絶対値の速さで再生し（ブラウザは逆再生できません）、範囲のラベルに出力される内容が表示されます。オーディオが付くのはちょうど `1` のときだけです。フレームレートが固定なので、それ以外ではリサンプルや反転をしないと同期が取れず、間違ったオーディオより無音のほうがましだからです。
+
+**オーディオ**も同じ範囲に切り出されます。**長さ**の指定は意図的にありません。出力を `Loop Video` に渡してください。範囲は 10000 フレームが上限で、`speed` 適用後の出力も同じ上限です（長い範囲に遅い速度を指定するとこちらに先に当たります）。
 
 ### Save as GIF
 
@@ -635,7 +647,7 @@ VIDEO または画像バッチをアニメーション WebP として書き出�
 
 ## 動作
 
-長さと速度の制御は、`Load GIF as Video` と `Loop Video` で同じ挙動になります。`Load Video (Trim & Loop Assist)` にはどちらもありません。範囲を切り出すだけで、長さと速度は `Loop Video` に任せます。
+長さと速度の制御は、`Load GIF as Video` と `Loop Video` で同じ挙動になります。`Load Video (Trim & Loop Assist)` には長さの指定がなく（範囲を切り出すだけで、ループは `Loop Video` に任せます）、`speed` の意味も違います。ファイルのレートのままフレームに焼き込み、負の値も取れます。[そのノードの節](#load-video-trim--loop-assist-1)を参照してください。
 
 **フレームレートは自動です。** `video` 出力のフレームレートはソース自身のレートに `speed` を掛けたもので、fps ウィジェットはありません。フレームの補間は一切行わず、`speed = 1.0` では両方の出力が元のタイミングのままフレーム単位で忠実なコピーになります。
 
@@ -758,6 +770,8 @@ ComfyUI_00042_.gif
 **フレームの長さ。** WebP はフレームの長さをミリ秒で保持するため、ほとんどのフレームレートはほぼ格子に乗ります。GIF ノードと同じ累積丸めを使う（12fps なら 83, 84, 83, 83, 84… ms）ので、再生時間は元と一致します。`fps` の上限は 60 です。10 ms 以下のフレームは、ブラウザが GIF で 100 ms に読み替え始める領域で、そこに近づかないことには何のコストもないからです。
 
 **透過の余白。** `pad` のときの余白は本物のアルファとして書き込まれ、余白のないファイルにはアルファがまったく含まれません。`images` 出力では余白は GIF ノードと同じく黒に合成されます。GIF と同様、絵の部分は常に不透明です。ComfyUI の VIDEO にも IMAGE にもアルファチャンネルはありません。
+
+**進捗とキャンセル。** このノードの進捗バーは、フレームの変換・エンコード・ファイルの読み戻しの 3 パスにわたって進みます。キャンセルは実行中のパスのフレームの区切りで効くので、`method` 6 の長い可逆エンコードも 1〜2 フレームのうちに止まります。ファイルはエンコード完了後にしか書かれないため、キャンセルしたジョブがファイルを残すことはありません。
 
 ## インストール
 

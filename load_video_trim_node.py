@@ -10,6 +10,7 @@ HTTP routes registered here, so it works without queueing the graph.
 
 import asyncio
 import io
+import math
 import os
 from collections import OrderedDict
 from fractions import Fraction
@@ -19,7 +20,8 @@ from PIL import Image
 import folder_paths
 
 from . import video_source
-from .video_length import MAX_OUTPUT_FRAMES
+from .progress import Progress
+from .video_length import MAX_OUTPUT_FRAMES, speed_baked_indices
 
 try:
     from comfy_api.input_impl import VideoFromComponents
@@ -31,13 +33,13 @@ except ImportError as exc:  # ComfyUI too old to have the VIDEO type
     VideoComponents = None
     _VIDEO_IMPORT_ERROR = exc
 
-try:
-    from comfy.utils import ProgressBar
-except ImportError:  # pragma: no cover - only outside ComfyUI
-    ProgressBar = None
-
 _MAX_FRAME_INDEX = 10_000_000
 _MAX_CROP = 16384
+
+# `speed` is a slider: 4 either way at 0.05 steps is 160 positions, which the
+# widget can place by eye, and anything faster is `Loop Video`'s job (it goes
+# to 100). The sign is the direction.
+MAX_SPEED = 4.0
 
 
 def _list_video_files():
@@ -60,16 +62,29 @@ def _list_video_files():
     return sorted(files)
 
 
-def _progress_bar(total):
-    """A `progress(done, total)` callback backed by ComfyUI's progress bar, or None."""
-    if ProgressBar is None or total <= 0:
+def speed_order(count, speed):
+    """Row order that bakes `speed` into a range of `count` frames, or None at 1.0.
+
+    The frame rate the node reports never changes, so speed has to be expressed
+    as frames: `speed_baked_indices` steps `|speed|` source frames per output
+    frame over `round(count / |speed|)` frames — 2 keeps every other frame and
+    halves the running time, 0.5 repeats each frame and doubles it — and a
+    negative speed walks that same sequence from the end of the range back to
+    the start. 0 is refused rather than read as "still", and 1.0 returns None
+    so the caller can skip the gather and keep the audio.
+    """
+    speed = float(speed)
+    if speed == 1.0:
         return None
-    bar = ProgressBar(total)
-
-    def update(done, _total):
-        bar.update_absolute(min(done, total), total)
-
-    return update
+    if not math.isfinite(speed) or speed == 0.0:
+        raise ValueError(
+            f"speed must be a non-zero number (got {speed}); use a negative "
+            "value to play the range backwards"
+        )
+    order = speed_baked_indices(count, count, abs(speed))
+    if speed < 0:
+        order = (count - 1) - order
+    return order
 
 
 class LoadVideoTrim:
@@ -148,21 +163,49 @@ class LoadVideoTrim:
                         "tooltip": "Height of the crop box in pixels; 0 runs to the bottom edge.",
                     },
                 ),
+                "speed": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": -MAX_SPEED,
+                        "max": MAX_SPEED,
+                        "step": 0.05,
+                        "round": 0.01,
+                        "display": "slider",
+                        "tooltip": "Playback speed, baked into the frames: the frame rate stays the file's own. 2 keeps every other frame of the range (half the frames, half the time), 0.5 repeats each frame (twice the frames), and a negative value plays the range backwards. Anything other than 1 drops the audio. 0 is not allowed.",
+                    },
+                ),
             },
         }
 
-    RETURN_TYPES = ("VIDEO", "IMAGE")
-    RETURN_NAMES = ("video", "images")
+    # `fps`, `width` and `height` are appended after the two original outputs so
+    # saved workflows keep their links. `width`/`height` are the frames as
+    # emitted, i.e. after the crop; `fps` is the file's rate, which `speed`
+    # deliberately does not change.
+    RETURN_TYPES = ("VIDEO", "IMAGE", "FLOAT", "INT", "INT")
+    RETURN_NAMES = ("video", "images", "fps", "width", "height")
     FUNCTION = "load"
     CATEGORY = "load-gif-as-video"
     DESCRIPTION = (
         "Loads a frame range of a video, optionally cropped, as a VIDEO with its "
-        "audio and as an IMAGE batch. The node's panel scrubs the file, sets the "
-        "range and crop box, and finds frames that match the one under the "
-        "playhead, so a loop can be cut where the picture repeats."
+        "audio and as an IMAGE batch, plus the frame rate and the cropped size. "
+        "The node's panel scrubs the file, sets the range and crop box, and "
+        "finds frames that match the one under the playhead, so a loop can be "
+        "cut where the picture repeats. `speed` drops or repeats frames (or "
+        "reverses them) at the file's own frame rate."
     )
 
-    def load(self, file, start_frame, end_frame, crop_x, crop_y, crop_w, crop_h):
+    def load(
+        self,
+        file,
+        start_frame,
+        end_frame,
+        crop_x,
+        crop_y,
+        crop_w,
+        crop_h,
+        speed=1.0,
+    ):
         if VideoFromComponents is None or VideoComponents is None:
             raise RuntimeError(
                 "This ComfyUI build has no VIDEO support (comfy_api.input_impl is "
@@ -170,7 +213,7 @@ class LoadVideoTrim:
             )
 
         path = folder_paths.get_annotated_filepath(file)
-        index = video_source.get_index(path, _progress_bar(_claimed_frames(path)))
+        index = video_source.get_index(path, Progress(_claimed_frames(path)))
         total = index.frame_count
 
         start = int(start_frame)
@@ -191,6 +234,7 @@ class LoadVideoTrim:
                 f"The range {start}..{end} is {count} frames, which exceeds the "
                 f"{MAX_OUTPUT_FRAMES} frame limit"
             )
+        order = speed_order(count, speed)  # also enforces the limit on the output
 
         images = video_source.decode_range(
             path,
@@ -198,17 +242,23 @@ class LoadVideoTrim:
             end,
             crop=(crop_x, crop_y, crop_w, crop_h),
             index=index,
-            progress=_progress_bar(count),
+            progress=Progress(count),
+            order=order,
         )
 
         fps = Fraction(index.frame_rate)
-        audio = video_source.decode_audio(
-            path, index.frame_time(start), float(count / fps)
-        )
+        # Audio only at speed 1: the frame rate does not move, so a resampled or
+        # reversed waveform would be needed to stay in step, and no audio beats
+        # wrong audio (the same call `Loop Video` makes).
+        audio = None
+        if order is None:
+            audio = video_source.decode_audio(
+                path, index.frame_time(start), float(count / fps)
+            )
         video = VideoFromComponents(
             VideoComponents(images=images, frame_rate=fps, audio=audio)
         )
-        return (video, images)
+        return (video, images, float(fps), int(images.shape[2]), int(images.shape[1]))
 
     @classmethod
     def IS_CHANGED(cls, file, **kwargs):

@@ -718,11 +718,18 @@ def read_frame(path, frame, index=None):
     raise ValueError(f"Frame {frame} could not be decoded from '{path}'")
 
 
-def decode_range(path, start, end, crop=None, index=None, progress=None):
+def decode_range(path, start, end, crop=None, index=None, progress=None, order=None):
     """Frames `start <= i < end` as a float32 tensor [N, H, W, 3] in 0..1.
 
     The tensor is allocated up front and filled frame by frame, so the full
     batch never exists twice (once as uint8, once as float).
+
+    `order`, if given, is an int array of offsets into the range (`0 <= v <
+    end - start`, repeats and any order allowed), and the tensor then holds the
+    range's frames in that order — one row per entry. That is how `speed` is
+    baked in: the decoder still walks the range once, converts each frame it
+    needs exactly once, copies it into every row that wants it, skips the
+    frames nothing wants, and stops after the last one that is.
     """
     index = index or get_index(path)
     if not 0 <= start < end <= index.frame_count:
@@ -731,7 +738,24 @@ def decode_range(path, start, end, crop=None, index=None, progress=None):
         )
     x, y, w, h = resolve_crop(index.width, index.height, *(crop or (0, 0, 0, 0)))
     count = end - start
-    out = torch.empty((count, h, w, 3), dtype=torch.float32)
+
+    rows_for = None  # source offset -> output rows, when `order` is given
+    if order is not None:
+        order = np.asarray(order, dtype=np.int64).ravel()
+        if order.size == 0:
+            raise ValueError("The frame order is empty")
+        if order.min() < 0 or order.max() >= count:
+            raise ValueError(
+                f"Frame order offsets must lie within 0..{count - 1} of the range"
+            )
+        rows_for = {}
+        for row, offset in enumerate(order.tolist()):
+            rows_for.setdefault(offset, []).append(row)
+        count = int(order.max()) + 1  # frames that must be decoded
+        end = start + count
+    out = torch.empty(
+        (len(order) if order is not None else count, h, w, 3), dtype=torch.float32
+    )
 
     filled = 0
     with av.open(path) as container:
@@ -739,10 +763,12 @@ def decode_range(path, start, end, crop=None, index=None, progress=None):
         for i, decoded in _frames_from(container, stream, index, start):
             if i >= end:
                 break
-            rgb = _to_rgb(decoded, index.rotation)[y : y + h, x : x + w]
-            out[i - start] = (
-                torch.from_numpy(np.ascontiguousarray(rgb)).float().div_(255.0)
-            )
+            rows = [i - start] if rows_for is None else rows_for.get(i - start)
+            if rows:
+                rgb = _to_rgb(decoded, index.rotation)[y : y + h, x : x + w]
+                frame = torch.from_numpy(np.ascontiguousarray(rgb)).float().div_(255.0)
+                for row in rows:
+                    out[row] = frame
             filled += 1
             if progress is not None:
                 progress(filled, count)

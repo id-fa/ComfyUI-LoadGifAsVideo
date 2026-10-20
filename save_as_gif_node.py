@@ -32,11 +32,7 @@ from .gif_dither import (
     Ditherer,
 )
 from .gif_palette import MAX_COLORS, QUANTIZERS, build_palette, uniform_palette
-
-try:
-    from comfy.utils import ProgressBar
-except ImportError:  # ComfyUI too old, or the module imported outside ComfyUI
-    ProgressBar = None
+from .progress import Progress
 
 PALETTE_SCOPES = ["global", "per_frame"]
 
@@ -350,8 +346,18 @@ class SaveAsGif:
         # everything that looks at colors — a mask screen's ink is fixed and
         # never sees it, so raising gamma lifts only the ground between the
         # dots, which is exactly the part a black screen makes look too dark.
+        # No bar for this pass (the dither below owns it), but still a cancel
+        # check per frame: a long clip resized here is already seconds of work.
         frames, frame_rate, layout = prepare_frames(
-            source, source_rate, fps, width, height, size_mode, resample, gamma
+            source,
+            source_rate,
+            fps,
+            width,
+            height,
+            size_mode,
+            resample,
+            gamma,
+            Progress(0),
         )
         scaled_w, scaled_h, canvas_w, canvas_h, offset_x, offset_y = layout
         count = frames.shape[0]
@@ -422,9 +428,8 @@ class SaveAsGif:
         # — every bar, every unchanged pixel.
         ditherers = None
         spare = None
-        progress = None
-        if ProgressBar is not None:
-            progress = ProgressBar(count if shared is not None else 2 * count)
+        # The bar is also the cancel check: see `progress.py`.
+        progress = Progress(count if shared is not None else 2 * count)
         if shared is None:
             ditherers = []
             for i in range(count):
@@ -438,8 +443,7 @@ class SaveAsGif:
                         halftone_steps,
                     )
                 )
-                if progress is not None:
-                    progress.update(1)
+                progress.step(1)
             if transparent:
                 try:
                     spare = _spare_color(np.vstack([d.palette for d in ditherers]))
@@ -492,8 +496,7 @@ class SaveAsGif:
                 same = np.all(result[i] == result[i - 1], axis=-1)
                 if same.all():
                     durations[-1] += delays[i]
-                    if progress is not None:
-                        progress.update(1)
+                    progress.step(1)
                     continue
                 diffed = np.where(same, 0, indices).astype(np.uint8)
                 if shared is not None:
@@ -527,8 +530,7 @@ class SaveAsGif:
             # Reported in `info`. Under `per_frame` this ends up being the last
             # frame's count, which is the honest answer — there is no single one.
             colors_written = len(palette)
-            if progress is not None:
-                progress.update(1)
+            progress.step(1)
 
         output_dir = folder_paths.get_output_directory()
         full_output_folder, filename, counter, subfolder, _ = (

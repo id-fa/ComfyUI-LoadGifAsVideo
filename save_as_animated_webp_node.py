@@ -7,6 +7,7 @@ libwebp does the compressing. So the node is the GIF node with the color block
 swapped for libwebp's three knobs: `lossless`, `quality`, `method`.
 """
 
+import io
 import os
 
 import numpy as np
@@ -15,12 +16,14 @@ from PIL import Image
 
 import folder_paths
 
+from .progress import Progress
 from .save_frames import (
     MAX_DIMENSION,
     MAX_GAMMA,
     MIN_GAMMA,
     RESAMPLERS,
     SIZE_MODES,
+    decimate,
     frame_durations,
     prepare_frames,
     resolve_source,
@@ -41,7 +44,31 @@ MAX_METHOD = 6
 DEFAULT_METHOD = 4
 
 
-def _rgba_pages(frames, layout):
+class _Page(Image.Image):
+    """A page of the animation that reports when the encoder reaches it.
+
+    Pillow hands the whole animation to libwebp's `WebPAnimEncoder` inside one
+    `save(save_all=True)` call, and that call offers no per-frame hook — which
+    is why Cancel used to be ignored until the file was finished. But its
+    writer (`WebPImagePlugin._save_all`) does call `seek(idx)` on every image in
+    `append_images` immediately before encoding it, in every Pillow release
+    that can write animated WebP. A page that overrides `seek` therefore gets a
+    word in between frames, and that word is the progress bar's interrupt check.
+    The private `_webp` encoder could be driven directly instead, but its
+    constructor and `add` changed shape between Pillow 11 and 12; `seek` did not.
+    """
+
+    def __init__(self, image, on_seek):
+        super().__init__()
+        self.__dict__.update(image.__dict__)
+        self._on_seek = on_seek
+
+    def seek(self, frame):
+        self._on_seek()
+        super().seek(frame)
+
+
+def _rgba_pages(frames, layout, on_seek):
     """The frames as Pillow images on the canvas, with transparent bars if padded.
 
     Under `fit`, or with no box at all, the canvas is the frame and the pages
@@ -49,6 +76,7 @@ def _rgba_pages(frames, layout):
     Under `pad` the picture is pasted onto a fully transparent canvas, so the
     bars come out as real alpha-0 pixels rather than a solid color. (Pillow's
     reader reports every animated WebP as RGBA whichever way it was written.)
+    `on_seek` is called as the encoder reaches each page; see `_Page`.
     """
     scaled_w, scaled_h, canvas_w, canvas_h, offset_x, offset_y = layout
     letterboxed = (scaled_w, scaled_h) != (canvas_w, canvas_h)
@@ -59,11 +87,33 @@ def _rgba_pages(frames, layout):
             canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
             canvas.paste(page, (offset_x, offset_y))
             page = canvas
-        pages.append(page)
+        pages.append(_Page(page, on_seek))
     return pages, letterboxed
 
 
-def _read_back(path, count, canvas_w, canvas_h):
+def _encode(pages, durations, loop_count, lossless, quality, method):
+    """The animation as WebP bytes.
+
+    Encoded into memory rather than straight to the file so that a cancel in
+    the middle (raised out of `_Page.seek`) leaves nothing behind on disk — not
+    even an empty file with the counter's name.
+    """
+    buffer = io.BytesIO()
+    pages[0].save(
+        buffer,
+        format="WEBP",
+        save_all=True,
+        append_images=pages[1:],
+        duration=durations,
+        loop=int(loop_count),
+        lossless=bool(lossless),
+        quality=int(quality),
+        method=int(method),
+    )
+    return buffer.getvalue()
+
+
+def _read_back(path, count, canvas_w, canvas_h, progress=None):
     """The written file decoded to a uint8 [N, H, W, 3] batch, alpha composited on black.
 
     This is what the `images` output shows: under `lossless` it is the input
@@ -81,6 +131,8 @@ def _read_back(path, count, canvas_w, canvas_h):
             page = np.asarray(image.convert("RGBA"), dtype=np.uint16)
             alpha = page[..., 3:4]
             result[i] = ((page[..., :3] * alpha + 127) // 255).astype(np.uint8)
+            if progress is not None:
+                progress(i + 1, count)
     return result
 
 
@@ -243,19 +295,43 @@ class SaveAsAnimatedWebP:
         video=None,
         images=None,
     ):
-        source, source_rate = resolve_source(video, images, source_fps)
-        frames, frame_rate, layout = prepare_frames(
-            source, source_rate, fps, width, height, size_mode, resample, gamma
-        )
-        count = frames.shape[0]
-        canvas_w, canvas_h = layout[2], layout[3]
         if not MIN_METHOD <= int(method) <= MAX_METHOD:
             raise ValueError(f"method must be between {MIN_METHOD} and {MAX_METHOD}")
         if not 0 <= int(quality) <= 100:
             raise ValueError("quality must be between 0 and 100")
 
-        pages, letterboxed = _rgba_pages(frames, layout)
+        source, source_rate = resolve_source(video, images, source_fps)
+        # Three passes over the frames — convert, encode, read back — on one
+        # bar, each of which is also where a cancel takes effect. The count is
+        # only known after decimation, so the bar is sized from a dry run of it.
+        kept, _ = decimate(int(source.shape[0]), source_rate, fps)
+        count = int(source.shape[0]) if kept is None else int(kept.shape[0])
+        progress = Progress(3 * count)
+        frames, frame_rate, layout = prepare_frames(
+            source,
+            source_rate,
+            fps,
+            width,
+            height,
+            size_mode,
+            resample,
+            gamma,
+            progress.stage(count),
+        )
+        count = frames.shape[0]
+        canvas_w, canvas_h = layout[2], layout[3]
+
+        encoded = progress.stage(count)
+        reached = [0]
+
+        def on_seek():
+            reached[0] += 1
+            encoded(reached[0] - 1, count)
+
+        pages, letterboxed = _rgba_pages(frames, layout, on_seek)
         durations = frame_durations(count, float(frame_rate), 1000, _MIN_DURATION_MS)
+        data = _encode(pages, durations, loop_count, lossless, quality, method)
+        encoded(count, count)
 
         output_dir = folder_paths.get_output_directory()
         full_output_folder, filename, counter, subfolder, _ = (
@@ -265,21 +341,13 @@ class SaveAsAnimatedWebP:
         )
         file = f"{filename}_{counter:05}_.webp"
         path = os.path.join(full_output_folder, file)
-        pages[0].save(
-            path,
-            save_all=True,
-            append_images=pages[1:],
-            duration=durations,
-            loop=int(loop_count),
-            lossless=bool(lossless),
-            quality=int(quality),
-            method=int(method),
-        )
+        with open(path, "wb") as handle:
+            handle.write(data)
 
-        written = os.path.getsize(path)
+        written = len(data)
         # What the viewer will see, not what the encoder was handed: under lossy
         # the two differ, and the difference is the thing `quality` is tuned on.
-        result = _read_back(path, count, canvas_w, canvas_h)
+        result = _read_back(path, count, canvas_w, canvas_h, progress.stage(count))
 
         info = "\n".join(
             [
