@@ -194,7 +194,7 @@ class SaveAsAnimatedWebP:
                     SIZE_MODES,
                     {
                         "default": "pad",
-                        "tooltip": "What `width` x `height` means when the source has a different aspect ratio. pad: the box is the canvas — the frame is centred and the leftover bars are written transparent, so the WebP is exactly the requested size. fit: the frame is scaled to the largest size that fits inside the box and written at that size, with no bars. Same thing whenever only one of width/height is set.",
+                        "tooltip": "What `width` x `height` means when the source has a different aspect ratio. pad: the box is the canvas — the frame is centred and the leftover bars are written transparent, so the WebP is exactly the requested size. fit: the frame is scaled to the largest size that fits inside the box and written at that size, with no bars. long_side: only the longer of width/height is used, and the frame is scaled so its own longer side is that many pixels — the output follows the source's orientation and aspect ratio, with no bars. All the same whenever only one of width/height is set.",
                     },
                 ),
                 "resample": (

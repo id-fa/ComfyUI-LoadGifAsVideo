@@ -115,7 +115,7 @@ Writes a VIDEO or an image batch out as an animated GIF. GIF holds at most 256 c
 | `fps` | FLOAT | Frame rate of the GIF. Below the source rate it **drops frames**: same running time, fewer frames, smaller file. Above it, nothing happens. |
 | `width` | INT | Output width in pixels. `0` keeps the source width, or derives it from `height`. |
 | `height` | INT | Output height in pixels. `0` keeps the source height, or derives it from `width`. |
-| `size_mode` | `pad` / `fit` | What `width` × `height` means when the source's aspect ratio differs: `pad` writes a GIF of exactly that size with transparent bars, `fit` writes the largest frame that fits inside it, with no bars. |
+| `size_mode` | `pad` / `fit` / `long_side` | What `width` × `height` means when the source's aspect ratio differs: `pad` writes a GIF of exactly that size with transparent bars, `fit` writes the largest frame that fits inside it, with no bars, `long_side` gives the longer of the two numbers to the source's longer side and derives the other. |
 | `resample` | see below | Filter used when scaling. |
 | `colors` | INT | Palette size, 2–256. Fewer colors means a smaller file and a stronger dither pattern. |
 | `palette_scope` | `global` / `per_frame` | One palette for the whole animation, or a fresh one per frame. |
@@ -235,7 +235,7 @@ Writes a VIDEO or an image batch out as an animated WebP. WebP stores full 24-bi
 | `fps` | FLOAT | Frame rate of the WebP, up to 60. Below the source rate it **drops frames**: same running time, fewer frames, smaller file. Above it, nothing happens. |
 | `width` | INT | Output width in pixels. `0` keeps the source width, or derives it from `height`. |
 | `height` | INT | Output height in pixels. `0` keeps the source height, or derives it from `width`. |
-| `size_mode` | `pad` / `fit` | What `width` × `height` means when the source's aspect ratio differs: `pad` writes a file of exactly that size with transparent bars, `fit` writes the largest frame that fits inside it, with no bars. |
+| `size_mode` | `pad` / `fit` / `long_side` | What `width` × `height` means when the source's aspect ratio differs: `pad` writes a file of exactly that size with transparent bars, `fit` writes the largest frame that fits inside it, with no bars, `long_side` gives the longer of the two numbers to the source's longer side and derives the other. |
 | `resample` | see [Resample filters](#resample-filters) | Filter used when scaling. |
 | `lossless` | BOOLEAN | Off (default): lossy VP8, much smaller on photographic material. On: every pixel is stored exactly and the file decodes back to the `images` output bit for bit. |
 | `quality` | INT | Lossy: picture quality, 0–100. Lossless: compression *effort*, 0 (fast) to 100 (slow) — the pixels are exact either way. |
@@ -346,7 +346,16 @@ It does nothing for a single moving object, where the rectangle was already tigh
 - `pad` (default): the box is the canvas. The frame is centred and whatever is left over is written as GIF transparency, so a 4:3 clip on a square canvas gets transparent bars top and bottom and the file is exactly `width` × `height`. Use this when the GIF has to be a fixed size.
 - `fit`: the box is an upper bound. The frame is written at the largest size that fits inside it and nothing is padded, so a 4:3 clip into a 512 × 512 box comes out 512 × 384. Use this when you want "no bigger than" rather than "exactly".
 
-Leave either axis at `0` to derive it from the other, or both at `0` to keep the source size; with fewer than two axes given there is nothing to pad and the two modes are identical.
+- `long_side`: only the longer of `width` / `height` is used, and it becomes the length of the source's **longer** side; the shorter side follows from the source's aspect ratio. A 512 × 288 box gives a 16:9 clip 512 × 288 and a 9:16 clip 288 × 512 (where `fit` would give 162 × 288), so one setting serves landscape and portrait material alike. Nothing is padded.
+
+Leave either axis at `0` to derive it from the other, or both at `0` to keep the source size; with fewer than two axes given there is nothing to pad and all three modes are identical.
+
+**The size row.** Under `height` sits a row with an `aspect` picker and four buttons, `⅓` `½` `×2` `×3`. They are shortcuts for typing: each one rewrites the `width` / `height` widgets in place and does nothing else.
+
+- `aspect` keeps the longer of the two numbers and recomputes the other for the chosen ratio — `512 × 512` at `16:9` becomes `512 × 288`, at `9:16` `288 × 512`. This changes the **box** that `pad` and `fit` work from, never the picture's own aspect ratio.
+- The buttons multiply both numbers (rounded to whole pixels, capped at 8192).
+
+A number is left alone when it is `0` (that axis is derived, so there is nothing to work from) or when it comes from a link. The buttons still scale the other axis in that case; `aspect` needs both numbers and is greyed out.
 
 The transparent slot costs one palette entry, so a letterboxed GIF quantizes to at most 255 colors instead of 256. The bars are transparent in the file itself; in the `images` output — which has no alpha channel — they come out as whichever color ended up in that slot, normally black. `fit` never reserves the slot, so it keeps all 256.
 
@@ -512,7 +521,7 @@ VIDEO または画像バッチをアニメーション GIF として書き出し
 | `fps` | FLOAT | GIF のフレームレート。元のレートより下げるとフレームを間引きます（再生時間はそのまま、フレーム数が減り、ファイルが小さくなる）。元より上げても何も起きません。 |
 | `width` | INT | 出力の幅（ピクセル）。`0` でソースの幅のまま、または `height` から比率で決定。 |
 | `height` | INT | 出力の高さ（ピクセル）。`0` でソースの高さのまま、または `width` から比率で決定。 |
-| `size_mode` | `pad` / `fit` | ソースとアスペクト比が違うときの `width` × `height` の意味。`pad` はそのサイズのキャンバスに収めて余白を透過にし、`fit` はそのサイズに収まる最大サイズで余白なしに書き出します。 |
+| `size_mode` | `pad` / `fit` / `long_side` | ソースとアスペクト比が違うときの `width` × `height` の意味。`pad` はそのサイズのキャンバスに収めて余白を透過にし、`fit` はそのサイズに収まる最大サイズで余白なしに書き出し、`long_side` は 2 つの数値の大きい方をソースの長辺に割り当てて短辺を比率から決めます。 |
 | `resample` | 下記参照 | 拡大縮小に使うフィルタ。 |
 | `colors` | INT | パレットの色数、2〜256。少ないほどファイルは小さく、ディザの模様は強く出ます。 |
 | `palette_scope` | `global` / `per_frame` | アニメーション全体で 1 つのパレットを使うか、フレームごとに作り直すか。 |
@@ -632,7 +641,7 @@ VIDEO または画像バッチをアニメーション WebP として書き出�
 | `fps` | FLOAT | WebP のフレームレート、最大 60。元のレートより下げるとフレームを間引きます（再生時間はそのまま、フレーム数が減り、ファイルが小さくなる）。元より上げても何も起きません。 |
 | `width` | INT | 出力の幅（ピクセル）。`0` でソースの幅のまま、または `height` から比率で決定。 |
 | `height` | INT | 出力の高さ（ピクセル）。`0` でソースの高さのまま、または `width` から比率で決定。 |
-| `size_mode` | `pad` / `fit` | ソースとアスペクト比が違うときの `width` × `height` の意味。`pad` はそのサイズのキャンバスに収めて余白を透過にし、`fit` はそのサイズに収まる最大サイズで余白なしに書き出します。 |
+| `size_mode` | `pad` / `fit` / `long_side` | ソースとアスペクト比が違うときの `width` × `height` の意味。`pad` はそのサイズのキャンバスに収めて余白を透過にし、`fit` はそのサイズに収まる最大サイズで余白なしに書き出し、`long_side` は 2 つの数値の大きい方をソースの長辺に割り当てて短辺を比率から決めます。 |
 | `resample` | [リサンプルフィルタ](#リサンプルフィルタresample)参照 | 拡大縮小に使うフィルタ。 |
 | `lossless` | BOOLEAN | オフ（デフォルト）: 非可逆 VP8。写真的な素材ではずっと小さくなります。オン: 全ピクセルをそのまま保存し、ファイルは `images` 出力とビット単位で一致します。 |
 | `quality` | INT | 非可逆: 画質、0〜100。可逆: 圧縮の *手間*、0（速い）〜100（遅い）。可逆ではどの値でもピクセルは完全一致です。 |
@@ -743,7 +752,16 @@ ComfyUI_00042_.gif
 - `pad`（デフォルト）: 枠をそのままキャンバスにします。フレームは中央に配置され、余った領域は GIF の透過色として書き出されます。4:3 の素材を正方形に出すと上下に透明な帯が付き、ファイルは `width` × `height` ちょうどのサイズになります。GIF のサイズを固定したいときはこちらです。
 - `fit`: 枠を上限として扱います。フレームは枠に収まる最大サイズで書き出され、余白は付きません。4:3 の素材を 512 × 512 の枠に出すと 512 × 384 になります。「ちょうど」ではなく「これ以下」にしたいときはこちらです。
 
-片方を `0` にすればもう片方から比率で決まり、両方 `0` ならソースのサイズのままです。両方指定していない場合は余白の出る余地がないため、2 つのモードは同じ結果になります。
+- `long_side`: `width` / `height` のうち大きい方だけを使い、それをソースの**長辺**の長さにします。短辺はソースのアスペクト比から決まります。512 × 288 の枠なら 16:9 の素材は 512 × 288、9:16 の素材は 288 × 512 になり（`fit` では 162 × 288）、横長と縦長の素材を同じ設定で扱えます。余白は付きません。
+
+片方を `0` にすればもう片方から比率で決まり、両方 `0` ならソースのサイズのままです。両方指定していない場合は余白の出る余地がないため、3 つのモードは同じ結果になります。
+
+**サイズ行。** `height` のすぐ下に、`aspect` の選択と `⅓` `½` `×2` `×3` の 4 つのボタンが並びます。どれも入力の近道で、`width` / `height` ウィジェットの値をその場で書き換えるだけです。
+
+- `aspect` は 2 つの数値の大きい方を固定し、選んだ比率になるようもう片方を計算し直します。`512 × 512` で `16:9` を選ぶと `512 × 288`、`9:16` なら `288 × 512` です。変わるのは `pad` / `fit` の基準になる**枠**だけで、画像そのもののアスペクト比は変わりません。
+- ボタンは両方の数値を掛け算します（ピクセル単位に丸め、上限 8192）。
+
+値が `0` の軸（比率から決まる軸なので元になる数値が無い）と、リンクで外部から入力されている軸は書き換えません。その場合もボタンは残りの軸を拡大縮小しますが、`aspect` は両方の数値が必要なので無効になります。
 
 透過にはパレットを 1 エントリ使うため、余白が付く場合の減色は 256 色ではなく最大 255 色になります。余白が透明なのはファイルの中での話で、アルファチャンネルを持たない `images` 出力では、そのエントリに割り当てられた色（通常は黒）として出てきます。`fit` では透過エントリを確保しないため、256 色すべてが使えます。
 

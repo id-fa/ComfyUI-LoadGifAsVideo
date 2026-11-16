@@ -19,7 +19,10 @@ from .video_length import speed_baked_indices
 # `pad` is the original behavior and stays the default: the box is the canvas
 # and the leftover is transparent bars. `fit` scales the frame into the box and
 # writes it at that size, so the box is an upper bound rather than the output.
-SIZE_MODES = ["pad", "fit"]
+# `long_side` reads the box as one number — its longer side — and gives that to
+# the source's longer side, so the output takes the source's orientation and
+# aspect ratio whichever way round the box was typed.
+SIZE_MODES = ["pad", "fit", "long_side"]
 
 # Ordered best-quality-first for a downscale, which is what saving an animation
 # usually is. `nearest` is last because it is the specialist: it is the only one
@@ -126,10 +129,13 @@ def fit(source_width, source_height, width, height, mode="pad"):
     over when the box does not match it. `pad` treats the box as the canvas,
     centres the frame and leaves letterbox bars — those are what get written as
     transparent. `fit` makes the scaled frame itself the output, so the box is
-    only an upper bound and nothing is padded. A zero on either axis means
+    only an upper bound and nothing is padded. `long_side` takes only the box's
+    longer side and scales the source so that *its* longer side is that many
+    pixels: a 512 x 288 box gives a portrait source 288 x 512 where `fit` would
+    give 162 x 288. Nothing is padded there either. A zero on either axis means
     "derive it", and zero on both means "leave it alone", so the widgets default
     to doing nothing; with fewer than two axes given there is nothing to pad and
-    the two modes agree.
+    all the modes agree.
     """
     if mode not in SIZE_MODES:
         raise ValueError(f"Unknown size mode: {mode}")
@@ -142,10 +148,13 @@ def fit(source_width, source_height, width, height, mode="pad"):
         scaled_h = max(1, round(source_height * width / source_width))
         return width, scaled_h, width, scaled_h, 0, 0
 
-    scale = min(width / source_width, height / source_height)
+    if mode == "long_side":
+        scale = max(width, height) / max(source_width, source_height)
+    else:
+        scale = min(width / source_width, height / source_height)
     scaled_w = max(1, round(source_width * scale))
     scaled_h = max(1, round(source_height * scale))
-    if mode == "fit":
+    if mode != "pad":
         return scaled_w, scaled_h, scaled_w, scaled_h, 0, 0
     return (
         scaled_w,
